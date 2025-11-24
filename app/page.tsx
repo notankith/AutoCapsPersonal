@@ -1,5 +1,6 @@
 import { Button } from "@/components/ui/button"
 import { Check, Play, Zap, Globe, Sparkles, ArrowRight } from "lucide-react"
+import Image from "next/image"
 import Link from "next/link"
 
 export default function LandingPage() {
@@ -48,7 +49,15 @@ export default function LandingPage() {
 
         {/* Hero Image */}
         <div className="bg-card border border-border rounded-xl p-8 min-h-96 flex items-center justify-center overflow-hidden">
-          <img src="/video-editing-interface-with-captions.jpg" alt="AutoCaps video editor interface" className="w-full rounded-lg" />
+          <Image
+            src="/video-editing-interface-with-captions.jpg"
+            alt="AutoCaps video editor interface"
+            width={1280}
+            height={720}
+            className="w-full h-auto rounded-lg"
+            priority
+            sizes="(max-width: 1024px) 100vw, 896px"
+          />
         </div>
       </section>
 

@@ -1,10 +1,24 @@
 import { createClient } from "@/lib/supabase/server"
+import { createAdminClient } from "@/lib/supabase/admin"
+import { RETENTION_WINDOW_DAYS, STORAGE_BUCKETS } from "@/lib/pipeline"
+import { z } from "zod"
 import { type NextRequest, NextResponse } from "next/server"
 import { v4 as uuidv4 } from "uuid"
 
+const requestSchema = z.object({
+  fileName: z.string().min(1),
+  fileType: z.string().min(1),
+  fileSize: z.number().int().positive().optional(),
+  durationSeconds: z.number().positive().optional(),
+  metadata: z.record(z.any()).optional(),
+})
+
 export async function POST(request: NextRequest) {
   try {
+    const body = requestSchema.parse(await request.json())
     const supabase = await createClient()
+    const admin = createAdminClient()
+
     const {
       data: { user },
     } = await supabase.auth.getUser()
@@ -13,85 +27,59 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
     }
 
-    const formData = await request.formData()
-    const file = formData.get("file") as File
-    const title = formData.get("title") as string
-    const hasTranscript = formData.get("hasTranscript") === "true"
-    const customTranscript = formData.get("transcript") as string | null
+    const uploadId = uuidv4()
+    const sanitizedName = body.fileName.replace(/[^a-zA-Z0-9._-]/g, "_")
+    const requestedPath = `${user.id}/${uploadId}/${sanitizedName}`
+    const expiresAt = typeof RETENTION_WINDOW_DAYS === "number"
+      ? new Date(Date.now() + RETENTION_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString()
+      : null
 
-    if (!file) {
-      return NextResponse.json({ error: "No file provided" }, { status: 400 })
+    const { data: signedUpload, error: signedError } = await admin
+      .storage
+      .from(STORAGE_BUCKETS.uploads)
+      .createSignedUploadUrl(requestedPath)
+
+    if (signedError || !signedUpload) {
+      console.error("Failed to issue signed upload URL", signedError)
+      return NextResponse.json({ error: "Could not prepare upload" }, { status: 500 })
     }
 
-    if (!title) {
-      return NextResponse.json({ error: "Title is required" }, { status: 400 })
-    }
+    const rawPath = signedUpload.path ?? requestedPath
+    const bucketPrefix = `${STORAGE_BUCKETS.uploads}/`
+    const storagePath = rawPath.startsWith(bucketPrefix) ? rawPath.slice(bucketPrefix.length) : rawPath
 
-    // Generate unique file name
-    const fileExt = file.name.split(".").pop()
-    const fileName = `${uuidv4()}.${fileExt}`
-    const filePath = `videos/${user.id}/${fileName}`
-
-    // Upload to Supabase Storage
-    const { error: uploadError } = await supabase.storage.from("videos").upload(filePath, file, {
-      cacheControl: "3600",
-      upsert: false,
-    })
-
-    if (uploadError) {
-      console.error("[v0] Upload error:", uploadError)
-      return NextResponse.json({ error: "Failed to upload file" }, { status: 500 })
-    }
-
-    // Get public URL
-    const { data: publicUrlData } = supabase.storage.from("videos").getPublicUrl(filePath)
-
-    // Create video record in database
-    const { data: video, error: dbError } = await supabase
-      .from("videos")
-      .insert({
-        user_id: user.id,
-        title,
-        original_file_url: publicUrlData.publicUrl,
-        file_size: file.size,
-        status: hasTranscript && customTranscript ? "captions_ready" : "pending",
-        transcript: customTranscript || null,
-        language: "en",
-      })
-      .select()
-      .single()
-
-    if (dbError) {
-      console.error("[v0] Database error:", dbError)
-      return NextResponse.json({ error: "Failed to create video record" }, { status: 500 })
-    }
-
-    // Create processing job
-    const jobType = hasTranscript && customTranscript ? "export" : "transcription"
-    const { error: jobError } = await supabase.from("processing_jobs").insert({
-      video_id: video.id,
+    const { error: insertError } = await supabase.from("uploads").insert({
+      id: uploadId,
       user_id: user.id,
-      job_type: jobType,
-      status: "pending",
-      input_data: {
-        file_url: publicUrlData.publicUrl,
-        language: "en",
-        has_custom_transcript: hasTranscript,
-      },
+      file_name: body.fileName,
+      storage_path: storagePath,
+      mime_type: body.fileType,
+      file_size: body.fileSize ?? null,
+      duration_seconds: body.durationSeconds ?? null,
+      metadata: body.metadata ?? null,
+      status: "pending_upload",
+      expires_at: expiresAt,
     })
 
-    if (jobError) {
-      console.error("[v0] Job creation error:", jobError)
-      return NextResponse.json({ error: "Failed to create processing job" }, { status: 500 })
+    if (insertError) {
+      console.error("Failed to persist upload metadata", insertError)
+      return NextResponse.json({ error: "Failed to track upload" }, { status: 500 })
     }
 
     return NextResponse.json({
-      success: true,
-      videoId: video.id,
-      message: hasTranscript ? "Video uploaded with transcript" : "Video uploaded. Transcription starting...",
+      uploadId,
+      path: storagePath,
+      uploadUrl: signedUpload.signedUrl,
+      storagePath,
+      token: signedUpload.token,
+      expiresAt,
+      bucket: STORAGE_BUCKETS.uploads,
     })
   } catch (error) {
-    console.error("[v0] Upload error:", error)
+    console.error("Upload preparation error", error)
+    if (error instanceof z.ZodError) {
+      return NextResponse.json({ error: error.flatten() }, { status: 400 })
+    }
     return NextResponse.json({ error: "Internal server error" }, { status: 500 })
   }
 }

@@ -2,18 +2,41 @@
 
 import type React from "react"
 
-import { useState, useRef } from "react"
+import { useRef, useState } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Upload, AlertCircle, Loader } from "lucide-react"
+import { AlertCircle, CheckCircle, Loader, Upload } from "lucide-react"
 import { useRouter } from "next/navigation"
 
-export function VideoUploadForm() {
+type UploadPreparation = {
+  uploadId: string
+  uploadUrl: string
+  token: string
+  path: string
+  bucket: string
+}
+
+type TranscriptionResult = {
+  transcriptId?: string
+  jobId?: string
+}
+
+interface VideoUploadFormProps {
+  onComplete?: (result: { uploadId: string; transcriptId?: string }) => void
+}
+
+export function VideoUploadForm({ onComplete }: VideoUploadFormProps = {}) {
   const [file, setFile] = useState<File | null>(null)
   const [title, setTitle] = useState("")
   const [description, setDescription] = useState("")
+  const [hasTranscript, setHasTranscript] = useState(false)
+  const [transcriptText, setTranscriptText] = useState("")
+  const [rawTranscriptJson, setRawTranscriptJson] = useState("")
+  const [transcriptLanguage, setTranscriptLanguage] = useState("en")
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [statusMessage, setStatusMessage] = useState<string | null>(null)
+  const [successMessage, setSuccessMessage] = useState<string | null>(null)
   const [uploadProgress, setUploadProgress] = useState(0)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const router = useRouter()
@@ -40,39 +63,70 @@ export function VideoUploadForm() {
       return
     }
 
+    if (hasTranscript && !transcriptText.trim() && !rawTranscriptJson.trim()) {
+      setError("Provide transcript text or paste the transcript JSON response")
+      return
+    }
+
     setIsLoading(true)
     setError(null)
+    setStatusMessage("Preparing upload...")
+    setSuccessMessage(null)
+    setUploadProgress(0)
 
     try {
-      // Create FormData for file upload
-      const formData = new FormData()
-      formData.append("file", file)
-      formData.append("title", title)
-      formData.append("description", description)
+      const prepared = await prepareSignedUpload(file, title, description)
+      setStatusMessage("Uploading to Supabase Storage...")
+      await uploadFileWithProgress(
+        prepared,
+        file,
+        (progress) => setUploadProgress(Math.min(progress, 99)),
+      )
 
-      // Upload to API route
-      const response = await fetch("/api/videos/upload", {
-        method: "POST",
-        body: formData,
-      })
-
-      if (!response.ok) {
-        const data = await response.json()
-        throw new Error(data.error || "Upload failed")
+      let transcription: TranscriptionResult
+      if (hasTranscript) {
+        setStatusMessage("Saving provided transcript...")
+        const overridePayload = buildManualOverridePayload({
+          transcriptText,
+          rawTranscriptJson,
+          language: transcriptLanguage,
+        })
+        transcription = await startTranscription(prepared.uploadId, overridePayload, {
+          useMocks: USE_MOCK_TRANSCRIPTION,
+        })
+      } else {
+        setStatusMessage("Transcribing with AssemblyAI...")
+        transcription = await startTranscription(prepared.uploadId, undefined, {
+          useMocks: USE_MOCK_TRANSCRIPTION,
+        })
       }
 
-      const data = await response.json()
-      router.push(`/dashboard/editor/${data.videoId}`)
+      setUploadProgress(100)
+      setStatusMessage("Transcription complete")
+      setSuccessMessage("Upload successful! Redirecting to editor...")
+      setHasTranscript(false)
+      setTranscriptText("")
+      setRawTranscriptJson("")
+      setTranscriptLanguage("en")
+
+      setTimeout(() => {
+        if (onComplete) {
+          onComplete({ uploadId: prepared.uploadId, transcriptId: transcription.transcriptId })
+        } else {
+          router.push(`/dashboard/editor/${prepared.uploadId}`)
+        }
+      }, 800)
     } catch (err) {
       setError(err instanceof Error ? err.message : "An error occurred")
+      console.error(err)
     } finally {
       setIsLoading(false)
+      setStatusMessage(null)
     }
   }
 
   return (
     <form onSubmit={handleSubmit} className="space-y-6">
-      {/* File Upload Area */}
       <div
         className="border-2 border-dashed border-border rounded-lg p-8 text-center cursor-pointer hover:border-primary/50 transition-colors"
         onClick={() => fileInputRef.current?.click()}
@@ -83,13 +137,11 @@ export function VideoUploadForm() {
         <p className="text-sm text-muted-foreground">MP4, WebM, MOV • Max 2GB</p>
       </div>
 
-      {/* Title Input */}
       <div>
         <label className="block text-sm font-medium mb-2">Video Title</label>
         <Input placeholder="My Amazing Video" value={title} onChange={(e) => setTitle(e.target.value)} required />
       </div>
 
-      {/* Description Input */}
       <div>
         <label className="block text-sm font-medium mb-2">Description (Optional)</label>
         <textarea
@@ -101,7 +153,53 @@ export function VideoUploadForm() {
         />
       </div>
 
-      {/* Error Message */}
+      <div className="space-y-4 rounded-lg border border-border p-4">
+        <div className="flex items-center gap-3">
+          <input
+            id="has-transcript"
+            type="checkbox"
+            className="h-4 w-4"
+            checked={hasTranscript}
+            onChange={(event) => setHasTranscript(event.target.checked)}
+          />
+          <label htmlFor="has-transcript" className="font-medium">
+            I already have the transcript response
+          </label>
+        </div>
+
+        {hasTranscript && (
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium mb-2">Transcript language code (e.g. en, es)</label>
+              <Input value={transcriptLanguage} onChange={(e) => setTranscriptLanguage(e.target.value)} />
+            </div>
+
+            <div className="space-y-2">
+              <label className="block text-sm font-medium">Transcript text (fallback)</label>
+              <textarea
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                rows={4}
+                value={transcriptText}
+                onChange={(e) => setTranscriptText(e.target.value)}
+                placeholder="Paste a plain-text transcript if you do not have the raw AssemblyAI JSON"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label className="block text-sm font-medium">Raw transcript JSON (optional)</label>
+              <textarea
+                className="w-full rounded-md border border-input bg-background font-mono text-xs px-3 py-2"
+                rows={6}
+                value={rawTranscriptJson}
+                onChange={(e) => setRawTranscriptJson(e.target.value)}
+                placeholder='Paste the full response from AssemblyAI (e.g. { "text": "...", "words": [...] })'
+              />
+              <p className="text-xs text-muted-foreground">If both JSON and text are provided, JSON takes precedence.</p>
+            </div>
+          </div>
+        )}
+      </div>
+
       {error && (
         <div className="flex gap-2 p-3 bg-destructive/10 border border-destructive/30 rounded-md text-destructive">
           <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
@@ -109,11 +207,10 @@ export function VideoUploadForm() {
         </div>
       )}
 
-      {/* Upload Progress */}
-      {uploadProgress > 0 && uploadProgress < 100 && (
+      {uploadProgress > 0 && (
         <div className="space-y-2">
           <div className="flex items-center justify-between text-sm">
-            <span>Uploading...</span>
+            <span>{statusMessage ?? "Working..."}</span>
             <span>{uploadProgress}%</span>
           </div>
           <div className="w-full bg-secondary rounded-full h-2 overflow-hidden">
@@ -122,12 +219,18 @@ export function VideoUploadForm() {
         </div>
       )}
 
-      {/* Submit Button */}
+      {successMessage && !error && (
+        <div className="flex gap-2 p-3 bg-emerald-100 text-emerald-900 border border-emerald-200 rounded-md">
+          <CheckCircle className="w-5 h-5 flex-shrink-0" />
+          <p className="text-sm">{successMessage}</p>
+        </div>
+      )}
+
       <Button type="submit" className="w-full" disabled={isLoading || !file} size="lg">
         {isLoading ? (
           <>
             <Loader className="w-4 h-4 mr-2 animate-spin" />
-            Uploading...
+            Processing...
           </>
         ) : (
           <>
@@ -138,4 +241,116 @@ export function VideoUploadForm() {
       </Button>
     </form>
   )
+}
+
+async function prepareSignedUpload(file: File, title: string, description: string) {
+  const response = await fetch("/api/videos/upload", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      fileName: file.name,
+      fileType: file.type,
+      fileSize: file.size,
+      metadata: {
+        title,
+        description,
+      },
+    }),
+  })
+
+  const data = (await response.json()) as UploadPreparation & { error?: string }
+  if (!response.ok) {
+    throw new Error(data.error || "Failed to prepare upload")
+  }
+  return data
+}
+
+async function uploadFileWithProgress(payload: UploadPreparation, file: File, onProgress: (progress: number) => void) {
+  await new Promise<void>((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open("POST", payload.uploadUrl)
+    xhr.setRequestHeader("x-upsert", "false")
+
+    xhr.upload.onprogress = (event) => {
+      if (!event.lengthComputable) return
+      const percent = Math.round((event.loaded / event.total) * 100)
+      onProgress(percent)
+    }
+
+    xhr.onerror = () => reject(new Error("Network error while uploading to storage"))
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        onProgress(100)
+        resolve()
+      } else {
+        reject(new Error(`Storage upload failed (${xhr.status}) - ${xhr.responseText || "No response body"}`))
+      }
+    }
+
+    const formData = new FormData()
+    formData.append("cacheControl", "3600")
+    formData.append("file", file)
+    xhr.send(formData)
+  })
+}
+
+type ManualOverridePayload = {
+  text?: string
+  language?: string
+  model?: string
+  segments?: Array<{ id?: string; start?: number; end?: number; text: string }>
+  rawResponse?: unknown
+}
+
+const USE_MOCK_TRANSCRIPTION = process.env.NEXT_PUBLIC_ENABLE_TRANSCRIPTION_MOCKS === "true"
+
+async function startTranscription(
+  uploadId: string,
+  override?: ManualOverridePayload,
+  options?: { useMocks?: boolean },
+): Promise<TranscriptionResult> {
+  const response = await fetch("/api/videos/transcribe", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ uploadId, override, useMocks: options?.useMocks ?? false }),
+  })
+
+  const data = (await response.json()) as TranscriptionResult & { error?: string }
+  if (!response.ok) {
+    throw new Error(data.error || "Failed to transcribe video")
+  }
+  return data
+}
+
+function buildManualOverridePayload({
+  transcriptText,
+  rawTranscriptJson,
+  language,
+}: {
+  transcriptText: string
+  rawTranscriptJson: string
+  language: string
+}): ManualOverridePayload {
+  const cleanJson = rawTranscriptJson.trim()
+  if (cleanJson) {
+    try {
+      const parsed = JSON.parse(cleanJson)
+      return {
+        rawResponse: parsed,
+        language: language || undefined,
+      }
+    } catch (error) {
+      throw new Error("Invalid transcription JSON. Please ensure it is valid JSON.")
+    }
+  }
+
+  const text = transcriptText.trim()
+  if (!text) {
+    throw new Error("Provide either transcript text or transcript JSON")
+  }
+
+  return {
+    text,
+    language: language || undefined,
+  }
 }

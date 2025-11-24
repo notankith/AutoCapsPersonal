@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { VideoPlayer } from "./video-player"
 import { CaptionTimeline } from "./caption-timeline"
 import { CaptionEditor } from "./caption-editor"
@@ -18,14 +18,32 @@ interface Video {
 
 interface EditorLayoutProps {
   video: Video
+  onCaptionsChange?: (captions: any[]) => void
+  exportTrigger?: number
 }
 
-export function EditorLayout({ video }: EditorLayoutProps) {
+export function EditorLayout({ video, onCaptionsChange, exportTrigger }: EditorLayoutProps) {
   const [captions, setCaptions] = useState(video.captions || [])
   const [selectedCaption, setSelectedCaption] = useState<string | null>(null)
   const [currentTime, setCurrentTime] = useState(0)
   const [showExportPanel, setShowExportPanel] = useState(false)
   const [language, setLanguage] = useState(video.language)
+  const exportSignal = useRef(exportTrigger)
+
+  useEffect(() => {
+    onCaptionsChange?.(captions)
+  }, [captions, onCaptionsChange])
+
+  useEffect(() => {
+    if (typeof exportTrigger === "undefined") {
+      return
+    }
+    if (exportSignal.current === exportTrigger) {
+      return
+    }
+    exportSignal.current = exportTrigger
+    setShowExportPanel(true)
+  }, [exportTrigger])
 
   const handleCaptionUpdate = (id: string, updates: any) => {
     setCaptions(captions.map((cap) => (cap.id === id ? { ...cap, ...updates } : cap)))

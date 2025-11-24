@@ -1,23 +1,44 @@
 "use client"
 
-import { useRef, useEffect, useState } from "react"
+import { useRef, useEffect, useState, useMemo } from "react"
 import { Play, Pause, Volume2, VolumeX } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Slider } from "@/components/ui/slider"
+import { cn } from "@/lib/utils"
+import { type CaptionSegment, type CaptionTemplate, type CaptionWord } from "@/lib/pipeline"
+import { Templates } from "@/components/templates/data"
+import { CanvasCaptionRenderer } from "@/components/editor/canvas-caption-renderer"
+
+type PlayerCaption = CaptionSegment & {
+  start_time?: number
+  end_time?: number
+}
 
 interface VideoPlayerProps {
   videoUrl: string
   currentTime: number
   onTimeChange: (time: number) => void
-  captions: any[]
+  captions: PlayerCaption[]
+  className?: string
+  frameClassName?: string
+  templatePreviewId?: string
+  templateStyle?: CaptionTemplate
 }
 
-export function VideoPlayer({ videoUrl, currentTime, onTimeChange, captions }: VideoPlayerProps) {
+export function VideoPlayer({
+  videoUrl,
+  currentTime,
+  onTimeChange,
+  captions,
+  className,
+  frameClassName,
+  templatePreviewId,
+  templateStyle,
+}: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const [isPlaying, setIsPlaying] = useState(false)
   const [duration, setDuration] = useState(0)
   const [isMuted, setIsMuted] = useState(false)
-  const [currentCaption, setCurrentCaption] = useState<any | null>(null)
 
   useEffect(() => {
     const video = videoRef.current
@@ -46,12 +67,6 @@ export function VideoPlayer({ videoUrl, currentTime, onTimeChange, captions }: V
     }
   }, [currentTime])
 
-  useEffect(() => {
-    // Find current caption based on time
-    const caption = captions.find((cap) => currentTime >= cap.start_time && currentTime <= cap.end_time)
-    setCurrentCaption(caption)
-  }, [currentTime, captions])
-
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60)
     const secs = Math.floor(seconds % 60)
@@ -69,19 +84,27 @@ export function VideoPlayer({ videoUrl, currentTime, onTimeChange, captions }: V
     }
   }
 
+  const templateObj = useMemo(() => {
+    const id = templatePreviewId ?? (typeof templateStyle === "string" ? templateStyle : "minimal")
+    return Templates[id] ?? Templates.minimal
+  }, [templatePreviewId, templateStyle])
+
   return (
-    <div className="p-6 space-y-4 flex-1 flex flex-col bg-card/50">
-      <div className="flex-1 bg-black rounded-lg overflow-hidden relative flex items-center justify-center">
-        <video ref={videoRef} src={videoUrl} className="w-full h-full object-contain" />
+    <div className={cn("p-6 space-y-4 flex-1 flex flex-col bg-card/50", className)}>
+      <div
+        className={cn(
+          "flex-1 bg-black rounded-lg overflow-hidden relative flex items-center justify-center",
+          frameClassName,
+        )}
+      >
+        <video ref={videoRef} src={videoUrl} className="w-full h-full object-contain" muted={isMuted} />
 
         {/* Caption Overlay */}
-        {currentCaption && (
-          <div className="absolute bottom-12 left-0 right-0 text-center">
-            <div className="inline-block bg-black/80 px-4 py-2 rounded">
-              <p className="text-white text-lg font-semibold">{currentCaption.text}</p>
-            </div>
-          </div>
-        )}
+        <CanvasCaptionRenderer
+          videoRef={videoRef}
+          captions={captions}
+          template={templateObj}
+        />
 
         {/* Play Button Overlay */}
         {!isPlaying && (
@@ -130,3 +153,4 @@ export function VideoPlayer({ videoUrl, currentTime, onTimeChange, captions }: V
     </div>
   )
 }
+

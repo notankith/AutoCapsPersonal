@@ -27,7 +27,7 @@ export default async function HistoryPage() {
     redirect("/auth/login")
   }
 
-  const { data: videos = [], error: fetchError } = await supabase
+  const { data, error: fetchError } = await supabase
     .from("videos")
     .select("*")
     .eq("user_id", user.id)
@@ -36,6 +36,8 @@ export default async function HistoryPage() {
   if (fetchError) {
     console.error("Error fetching videos:", fetchError)
   }
+
+  const videos: Video[] = (data ?? []) as Video[]
 
   const formatFileSize = (bytes: number) => {
     const mb = bytes / (1024 * 1024)
