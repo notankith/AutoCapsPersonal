@@ -60,7 +60,7 @@ export async function POST(request: NextRequest) {
       segmentCount: captionSource.segments.length,
     }
 
-    // Create the job BEFORE sending to worker
+    // Create job
     const { data: job, error: jobError } = await supabase
       .from("jobs")
       .insert({
@@ -81,14 +81,10 @@ export async function POST(request: NextRequest) {
     // Upload caption file
     const captionPath = `${upload.user_id}/${upload.id}/${job.id}.${captionFile.format}`
 
-    const { error: payloadUpdateError } = await supabase
+    await supabase
       .from("jobs")
       .update({ payload: { ...basePayload, captionPath } })
       .eq("id", job.id)
-
-    if (payloadUpdateError) {
-      console.warn("Failed to update job payload with caption path", payloadUpdateError)
-    }
 
     const { error: captionUploadError } = await admin.storage
       .from(STORAGE_BUCKETS.captions)
@@ -103,7 +99,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Failed to store caption file" }, { status: 500 })
     }
 
-    // Update upload row
+    // Update upload status
     await supabase
       .from("uploads")
       .update({
@@ -113,9 +109,10 @@ export async function POST(request: NextRequest) {
       })
       .eq("id", upload.id)
 
-    // Construct worker payload fully
+    // Worker vars
     const workerUrl = assertEnv("FFMPEG_WORKER_URL", process.env.FFMPEG_WORKER_URL)
     const workerSecret = assertEnv("WORKER_JWT_SECRET", process.env.WORKER_JWT_SECRET)
+
     const token = jwt.sign({ jobId: job.id, uploadId: upload.id }, workerSecret, {
       expiresIn: "10m",
     })
@@ -131,8 +128,8 @@ export async function POST(request: NextRequest) {
       outputPath: `${upload.user_id}/${job.id}/rendered.mp4`,
     }
 
-    // Send to worker
-    const workerResponse = await fetch(workerUrl, {
+    // Send to worker (IMPORTANT: /render route restored)
+    const workerResponse = await fetch(`${workerUrl}/render`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${token}`,
@@ -153,7 +150,6 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Worker rejected job" }, { status: 502 })
     }
 
-    // Return everything frontend needs
     return NextResponse.json({
       jobId: job.id,
       uploadId: upload.id,
