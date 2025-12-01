@@ -10,9 +10,8 @@ import "dotenv/config"
 
 // FINAL AND ONLY FFmpeg BINARY
 const ffmpegBinary = process.env.FFMPEG_PATH || "ffmpeg"
-const CREATOR_KINETIC_FONT_PATH =
-  "d:\\VSCode Projects\\UIUXMAIN\\AutoCapsAI\\public\\fonts\\THEBOLDFONT-FREEVERSION.ttf"
-const CREATOR_KINETIC_FONT_DIR = "d:\\VSCode Projects\\UIUXMAIN\\AutoCapsAI\\public\\fonts"
+const CREATOR_KINETIC_FONT_PATH = join(process.cwd(), "public", "fonts", "THEBOLDFONT-FREEVERSION.ttf")
+const CREATOR_KINETIC_FONT_DIR = join(process.cwd(), "public", "fonts")
 
 type RenderJobPayload = {
   jobId: string
@@ -171,7 +170,7 @@ async function processJob(payload: RenderJobPayload) {
         const fontDest = join(uniqueFontDir, fontName)
         
         // Ensure we are copying from the correct source path
-        const sourceFontPath = "d:\\VSCode Projects\\UIUXMAIN\\AutoCapsAI\\public\\fonts\\THEBOLDFONT-FREEVERSION.ttf"
+        const sourceFontPath = CREATOR_KINETIC_FONT_PATH
         console.log(`[worker] Copying font from ${sourceFontPath} to ${fontDest}`)
         await fs.copyFile(sourceFontPath, fontDest)
         
