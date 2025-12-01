@@ -76,64 +76,108 @@ function generateSimpleEvents(template: CaptionTemplate, segments: CaptionSegmen
 }
 
 function generateKaraokeEvents(template: CaptionTemplate, segments: CaptionSegment[]): string {
-  // Build the highlight color array; allow cycling if highlightColors is provided
-  const highlightColors = template.karaoke?.highlightColors ?? (template.karaoke?.highlightColor ? [template.karaoke.highlightColor] : ["#FFFF00"]) 
-  const cycleAfter = template.karaoke?.cycleAfterChunks ?? 2
-  const baseColorAss = toAssColor(template.primaryColor)
-  const outlineColorAss = toAssColor(template.outlineColor)
+  const highlightColors =
+    template.karaoke?.highlightColors ??
+    (template.karaoke?.highlightColor ? [template.karaoke.highlightColor] : ["#FFFF00"]);
+  const cycleAfter = template.karaoke?.cycleAfterChunks ?? 2;
 
-  let globalChunkIndex = 0
+  const baseColorAss = toAssColor(template.primaryColor);
+  const outlineColorAss = toAssColor(template.outlineColor);
+
+  let globalChunkIndex = 0;
+
   return segments
     .map((segment) => {
-      if (!segment.words?.length) return "" // Skip or handle empty words
+      if (!segment.words?.length) return "";
 
-      // group words: max 3 per line, max 2 lines
-      const words = segment.words as SegmentWord[]
-      const chunks: SegmentWord[][] = []
-      let chunk: SegmentWord[] = []
+      const words = segment.words as SegmentWord[];
+
+      // split: max 3 per line
+      const chunks: SegmentWord[][] = [];
+      let chunk: SegmentWord[] = [];
       words.forEach((w, i) => {
-        chunk.push(w)
+        chunk.push(w);
         if (chunk.length === 3 || i === words.length - 1) {
-          chunks.push(chunk)
-          chunk = []
+          chunks.push(chunk);
+          chunk = [];
         }
-      })
+      });
 
       return chunks
         .map((chunk, ci) => {
-          const chunkStart = chunk[0].start
-          const chunkEnd = chunk[chunk.length - 1].end
+          const chunkStart = chunk[0].start;
+          const chunkEnd = chunk[chunk.length - 1].end;
 
-          const chunkZoomIn = `\\t(0,80,\\fscx105\\fscy105)\\t(80,160,\\fscx100\\fscy100)`
+          // Quick Zoom In (No Bounce): Start at 80% scale, zoom to 100% in 50ms
+          const chunkZoomIn = `\\fscx80\\fscy80\\t(0,50,\\fscx100\\fscy100)`;
 
-          // decide color for this chunk based on globalChunkIndex and cycle size
-          const colorIndex = Math.floor(globalChunkIndex / cycleAfter) % highlightColors.length
-          const highlightColorAss = toAssColor(highlightColors[colorIndex])
+          const colorIndex = Math.floor(globalChunkIndex / cycleAfter) % highlightColors.length;
+          const highlightColorAss = toAssColor(highlightColors[colorIndex]);
 
-          const sentence = chunk
+          // softer base glow (inactive)
+          const baseGlowAlpha = `\\alpha&H90&`; // very soft visibility
+
+          // ACTIVE glow tweaks (reduced intensity)
+          const makeActiveGlow = (rel: number, dur: number) => {
+            const highlightEnd = rel + dur;
+
+            // Reduced glow: Higher alpha (H80), smaller border (3), smaller blur (5)
+            const highlight = `\\t(${rel},${rel + 100},\\alpha&H80&\\1c${highlightColorAss}\\3c${highlightColorAss}\\bord3\\blur5)`;
+            const reset = `\\t(${highlightEnd},${highlightEnd + 100},\\alpha&H90&\\1c&H000000&\\3c&H000000&\\bord3\\blur4)`;
+
+            return { highlight, reset };
+          };
+
+          // LAYER 0: Glow
+          const sentenceGlow = chunk
             .map((word) => {
-              const rel = Math.round((word.start - chunkStart) * 1000)
-              const dur = Math.max(10, Math.round((word.end - word.start) * 1000))
-              const highlightEnd = rel + dur
+              const rel = Math.round((word.start - chunkStart) * 1000);
+              const dur = Math.max(10, Math.round((word.end - word.start) * 1000));
+              const active = makeActiveGlow(rel, dur);
 
-              const txt = escapeAssText(word.text.toUpperCase())
-              // Use template colors
-              const base = `\\1c${baseColorAss}\\3c${outlineColorAss}\\3a&H00&\\bord${template.outlineWidth}\\blur0\\fscx100\\fscy100`
-              const highlightStart = rel
-              const highlight = `\\t(${highlightStart},${highlightStart + 1},\\1c${highlightColorAss})`
-              const reset = `\\t(${highlightEnd},${highlightEnd + 1},\\1c${baseColorAss})`
+              const txt = escapeAssText(word.text.toUpperCase());
 
-              return `{${chunkZoomIn}${base}${highlight}${reset}}${txt}`
+              const base = `${baseGlowAlpha}\\1c&H000000&\\3c&H000000&\\bord3\\blur4`;
+
+              return `{${chunkZoomIn}${base}${active.highlight}${active.reset}}${txt}`;
             })
-            .join(" ")
+            .join(" ");
 
-          const lineBreak = ci === 0 ? "" : "\\N"
-          globalChunkIndex++
-          return `Dialogue: 0,${formatAssTimestamp(chunkStart)},${formatAssTimestamp(chunkEnd)},${template.name},,0,0,0,,${lineBreak}${sentence}`
+          // LAYER 1: Core Text (inactive subtle glow added)
+          const sentenceCore = chunk
+            .map((word) => {
+              const rel = Math.round((word.start - chunkStart) * 1000);
+              const dur = Math.max(10, Math.round((word.end - word.start) * 1000));
+              const highlightEnd = rel + dur;
+
+              const txt = escapeAssText(word.text.toUpperCase());
+
+              // subtle glow for all inactive words
+              const base = `\\1c${baseColorAss}\\3c&H000000&\\bord2\\blur2`;
+
+              const highlight = `\\t(${rel},${rel + 50},\\1c${highlightColorAss})`;
+              const reset = `\\t(${highlightEnd},${highlightEnd + 50},\\1c${baseColorAss})`;
+
+              return `{${chunkZoomIn}${base}${highlight}${reset}}${txt}`;
+            })
+            .join(" ");
+
+          const lineBreak = ci === 0 ? "" : "\\N";
+          globalChunkIndex++;
+
+          const lineGlow = `Dialogue: 0,${formatAssTimestamp(chunkStart)},${formatAssTimestamp(
+            chunkEnd
+          )},${template.name},,0,0,0,,${lineBreak}${sentenceGlow}`;
+
+          const lineCore = `Dialogue: 1,${formatAssTimestamp(chunkStart)},${formatAssTimestamp(
+            chunkEnd
+          )},${template.name},,0,0,0,,${lineBreak}${sentenceCore}`;
+
+          return `${lineGlow}\n${lineCore}`;
         })
-        .join("\n")
+        .join("\n");
     })
-    .join("\n")
+    .join("\n");
 }
 
 

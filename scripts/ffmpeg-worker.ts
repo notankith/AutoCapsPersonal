@@ -11,8 +11,8 @@ import "dotenv/config"
 // FINAL AND ONLY FFmpeg BINARY
 const ffmpegBinary = process.env.FFMPEG_PATH || "ffmpeg"
 const CREATOR_KINETIC_FONT_PATH =
-  "D:\\VSCode Projects\\autocapsuiux-main\\THEBOLDFONT-FREEVERSION.ttf"
-const CREATOR_KINETIC_FONT_DIR = dirname(CREATOR_KINETIC_FONT_PATH)
+  "d:\\VSCode Projects\\UIUXMAIN\\AutoCapsAI\\public\\fonts\\THEBOLDFONT-FREEVERSION.ttf"
+const CREATOR_KINETIC_FONT_DIR = "d:\\VSCode Projects\\UIUXMAIN\\AutoCapsAI\\public\\fonts"
 
 type RenderJobPayload = {
   jobId: string
@@ -107,6 +107,7 @@ async function processJob(payload: RenderJobPayload) {
   const outputTmp = join(tmpdir(), `${jobId}-render.mp4`)
   // Overlay files will be downloaded into temp paths and cleaned up in finally
   let overlayFiles: Array<RenderOverlay & { path?: string }> = []
+  let fontsDir: string | undefined;
 
   try {
     console.log("=== Getting Signed URLs ===")
@@ -156,14 +157,40 @@ async function processJob(payload: RenderJobPayload) {
     }
 
     console.log("[worker] Downloaded inputs, launching FFmpeg", { jobId })
+
+    // Copy font to temp directory to avoid path issues
+    fontsDir = CREATOR_KINETIC_FONT_DIR
+    // Check if template is karaoke (CreatorKinetic)
+    if (payload.template === "karaoke") {
+      try {
+        // Create a unique directory for this job to avoid scanning garbage
+        const uniqueFontDir = join(tmpdir(), `fonts_${jobId}`)
+        await fs.mkdir(uniqueFontDir, { recursive: true })
+        
+        const fontName = "CustomFont.ttf" // Simple name to avoid issues
+        const fontDest = join(uniqueFontDir, fontName)
+        
+        // Ensure we are copying from the correct source path
+        const sourceFontPath = "d:\\VSCode Projects\\UIUXMAIN\\AutoCapsAI\\public\\fonts\\THEBOLDFONT-FREEVERSION.ttf"
+        console.log(`[worker] Copying font from ${sourceFontPath} to ${fontDest}`)
+        await fs.copyFile(sourceFontPath, fontDest)
+        
+        fontsDir = uniqueFontDir
+        console.log("[worker] Copied font to unique temp dir:", fontsDir)
+      } catch (e) {
+        console.warn("[worker] Failed to copy font to temp, using original path:", e)
+      }
+    }
+
     await runFfmpeg(
       videoTmp,
       captionTmp,
       outputTmp,
       payload.captionFormat,
       payload.template,
-      `${resolution.width}x${resolution.height}`
-      , overlayFiles
+      `${resolution.width}x${resolution.height}`,
+      overlayFiles,
+      fontsDir
     )
 
     const file = await fs.readFile(outputTmp)
@@ -230,6 +257,14 @@ async function processJob(payload: RenderJobPayload) {
     if (Array.isArray(overlayFiles) && overlayFiles.length) {
       for (const f of overlayFiles) {
         if (f.path) await safeUnlink(f.path as string)
+      }
+    }
+    // cleanup fonts dir if it was created in temp
+    if (fontsDir && fontsDir.startsWith(tmpdir()) && fontsDir !== tmpdir()) {
+      try {
+        await fs.rm(fontsDir, { recursive: true, force: true })
+      } catch (e) {
+        console.warn("[worker] Failed to cleanup fonts dir:", e)
       }
     }
   }
@@ -307,15 +342,21 @@ function runFfmpeg(
   template: CaptionTemplate,
   _res: string,
   overlays: RenderOverlay[] = [],
+  customFontsDir?: string
 ) {
   // Center captions in the middle of the video using ASS alignment override (align=2)
-  const forceStyle =
+  let forceStyle =
     template === "minimal"
       ? "Fontname=Inter,Fontsize=40,PrimaryColour=&H00FFFFFF&,OutlineColour=&H00000000&,BackColour=&H64000000&,BorderStyle=4,Alignment=2"
       : "Alignment=2";
 
+  // Force the font for Creator Kinetic (karaoke) to ensure it picks up the custom font
+  if (template === "karaoke") {
+    forceStyle += ",Fontname=THE BOLD FONT (FREE VERSION)";
+  }
+
   const escapedCaptions = escapeFilterPath(captions);
-  const escapedFontsDir = escapeFilterPath(CREATOR_KINETIC_FONT_DIR);
+  const escapedFontsDir = escapeFilterPath(customFontsDir || CREATOR_KINETIC_FONT_DIR);
 
   // Build subtitles filter string
   const subtitlesFilter = (() => {

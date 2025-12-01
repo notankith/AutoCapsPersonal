@@ -20,6 +20,17 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" suppressHydrationWarning>
+      <head>
+        <style>{`
+          @font-face {
+            font-family: 'THEBOLDFONT-FREEVERSION';
+            src: url('/fonts/THEBOLDFONT-FREEVERSION.ttf') format('truetype');
+            font-weight: normal;
+            font-style: normal;
+            font-display: swap;
+          }
+        `}</style>
+      </head>
       <body className={`font-sans antialiased`}>
         {children}
         <Analytics />

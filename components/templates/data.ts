@@ -27,7 +27,7 @@ export const Templates: Record<string, CaptionTemplate> = {
   },
   karaoke: {
     name: "CreatorKinetic",
-    fontFamily: "THEBOLDFONT-FREEVERSION",
+    fontFamily: "THE BOLD FONT (FREE VERSION)",
     // Reduced by 15% (was 68), set to 58 to scale the text down
     fontSize: 58,
     primaryColor: "#FFFFFF",

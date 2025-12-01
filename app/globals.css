@@ -1,6 +1,50 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
+/* Force load THE BOLD FONT from public/fonts */
+@font-face {
+  font-family: 'THE BOLD FONT';
+  src: url('/fonts/THEBOLDFONT-FREEVERSION.ttf') format('truetype');
+  font-weight: normal;
+  font-style: normal;
+  font-display: block;
+}
+
+/* Alias for backend consistency */
+@font-face {
+  font-family: 'THE BOLD FONT (FREE VERSION)';
+  src: url('/fonts/THEBOLDFONT-FREEVERSION.ttf') format('truetype');
+  font-weight: normal;
+  font-style: normal;
+  font-display: block;
+}
+
+/* Backup font-face with font-weight 900 for extra bold rendering */
+@font-face {
+  font-family: 'THE BOLD FONT';
+  src: url('/fonts/THEBOLDFONT-FREEVERSION.ttf') format('truetype');
+  font-weight: 900;
+  font-style: normal;
+  font-display: block;
+}
+
+/* Force THEBOLDFONT for kinetic overlay */
+.force-boldfont {
+  font-family: 'THE BOLD FONT', 'Arial Black', sans-serif !important;
+  text-transform: uppercase;
+  font-weight: 900 !important;
+  letter-spacing: 0.04em;
+}
+
+.force-boldfont-glow {
+  text-shadow:
+    0 0 8px #fff,
+    0 0 16px #fff,
+    0 0 32px #39FF14,
+    0 0 48px #39FF14,
+    0 0 64px #39FF14 !important;
+}
+
 @custom-variant dark (&:is(.dark *));
 
 :root {
@@ -75,6 +119,7 @@
 }
 
 @theme inline {
+  --font-thebold: "THEBOLDFONT-FREEVERSION", "Arial Black", sans-serif;
   --font-sans: "Geist", "Geist Fallback";
   --font-mono: "Geist Mono", "Geist Mono Fallback";
   --color-background: var(--background);

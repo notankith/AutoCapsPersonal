@@ -1,23 +1,24 @@
 import React from "react"
 
-export function KineticCaptionOverlay({ segments, currentTime }) {
+import type { CaptionSegment, CaptionWord } from "@/lib/pipeline"
+
+interface KineticCaptionOverlayProps {
+  segments: CaptionSegment[]
+  currentTime: number
+}
+
+export function KineticCaptionOverlay({ segments, currentTime }: KineticCaptionOverlayProps) {
   // Find the active segment
-  const active = segments.find(seg => currentTime >= seg.start && currentTime <= seg.end)
+  const active = segments.find((seg: CaptionSegment) => currentTime >= seg.start && currentTime <= seg.end)
   if (!active || !active.words || !active.words.length) return null
 
-  // Creator Kinetics template details
-  const fontFamily = 'Retro Dreami Display Free Demo, sans-serif'
+  // Creator Kinetics overlay settings
   const fontSize = 58
-  const outlineColor = '#000'
-  const outlineWidth = 2
   const marginV = 50
   const highlightColors = ["#70e2ff", "#ffe83f", "#9fff5b"]
   const cycleAfterChunks = 2
-
-  // Word highlighting logic
   const words = active.words
-  // Find which word is currently being spoken
-  const activeWordIdx = words.findIndex(w => currentTime >= w.start && currentTime <= w.end)
+
   // Color cycling logic
   let chunkIdx = 0
   let colorIdx = 0
@@ -28,53 +29,101 @@ export function KineticCaptionOverlay({ segments, currentTime }) {
     if (chunkIdx % cycleAfterChunks === 0) colorIdx = (colorIdx + 1) % highlightColors.length
   }
 
-  // Render words with highlight
+  // PURE HTML rendering with forced font and glow via inline styles
   return (
     <div
+      className="font-thebold"
       style={{
         position: "absolute",
         left: 0,
         right: 0,
         bottom: marginV,
-        textAlign: "center",
-        fontFamily,
-        fontSize,
-        color: "#fff",
-        textTransform: "uppercase",
-        textShadow: `0 0 2px ${outlineColor}, 0 0 6px ${outlineColor}`,
-        WebkitTextStroke: `${outlineWidth}px ${outlineColor}`,
-        pointerEvents: "none",
         width: "100%",
+        pointerEvents: "none",
         zIndex: 10,
+        display: "flex",
+        justifyContent: "center",
+        alignItems: "center",
       }}
     >
-      {words.map((word, i) => {
-        // Which chunk is this word in?
-        const chunk = Math.floor(i / 3)
-        const color = colorMap[chunk]
-        const isActive = currentTime >= word.start && currentTime <= word.end
-        return (
-          <span
-            key={i}
-            style={{
-              margin: "0 0.18em",
-              padding: "0 0.08em",
-              background: isActive ? color : "transparent",
-              borderRadius: "0.2em",
-              transition: "background 0.2s",
-              boxShadow: isActive ? `0 0 12px ${color}` : undefined,
-            }}
-          >
-            {word.text}
-          </span>
-        )
-      })}
+      <div
+        style={{
+          fontFamily: "'THE BOLD FONT (FREE VERSION)', 'THE BOLD FONT', 'Arial Black', sans-serif",
+          fontSize: fontSize,
+          fontWeight: 900,
+          textTransform: "uppercase",
+          letterSpacing: "0.04em",
+          color: "#ffffff",
+          textAlign: "center",
+          display: "flex",
+          flexWrap: "wrap",
+          justifyContent: "center",
+          gap: "0.2em",
+          lineHeight: 1.2,
+        }}
+      >
+        {words.map((word: CaptionWord, i: number) => {
+          const chunk = Math.floor(i / 3)
+          const color = colorMap[chunk]
+          const isActive = currentTime >= word.start && currentTime <= word.end
+
+          // Double glow: White core + Colored aura + Hard Outline
+          const glowShadow = isActive
+            ? `
+              /* Core White Glow */
+              0 0 10px #fff,
+              0 0 20px #fff,
+              /* Colored Aura */
+              0 0 30px ${color},
+              0 0 40px ${color},
+              0 0 50px ${color},
+              0 0 60px ${color},
+              0 0 70px ${color},
+              /* Hard Outline */
+              -2px -2px 0 #000,
+              2px -2px 0 #000,
+              -2px 2px 0 #000,
+              2px 2px 0 #000
+            `
+            : `
+              /* Inactive: Simple Outline */
+              -1px -1px 0 #000,
+              1px -1px 0 #000,
+              -1px 1px 0 #000,
+              1px 1px 0 #000
+            `
+
+          return (
+            <span
+              key={i}
+              style={{
+                textShadow: glowShadow,
+                backgroundColor: isActive ? color : "transparent",
+                padding: "0.08em 0.12em",
+                borderRadius: "0.2em",
+                transition: "all 0.15s cubic-bezier(0.4, 0.0, 0.2, 1)",
+                transform: isActive ? "scale(1.2)" : "scale(1)",
+                display: "inline-block",
+                whiteSpace: "nowrap",
+                fontFamily: "'THE BOLD FONT (FREE VERSION)', 'THE BOLD FONT', 'Arial Black', sans-serif", // Force it here too
+              }}
+            >
+              {word.text}
+            </span>
+          )
+        })}
+      </div>
     </div>
   )
 }
 
-export function SimpleCaptionOverlay({ segments, currentTime }) {
-  const active = segments.find(seg => currentTime >= seg.start && currentTime <= seg.end)
+interface SimpleCaptionOverlayProps {
+  segments: CaptionSegment[]
+  currentTime: number
+}
+
+export function SimpleCaptionOverlay({ segments, currentTime }: SimpleCaptionOverlayProps) {
+  const active = segments.find((seg: CaptionSegment) => currentTime >= seg.start && currentTime <= seg.end)
   if (!active) return null
   return (
     <div
