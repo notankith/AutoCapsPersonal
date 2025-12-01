@@ -1,15 +1,16 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useState, useRef } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { VideoPlayer } from "./video-player"
+// import { VideoPlayer } from "./video-player"
 import { TemplateSelector } from "./template-selector"
 import { type TemplateOption } from "@/components/templates/types"
 import { defaultTemplates, findTemplateById } from "@/components/templates/data"
 import { Loader2, Layers, CheckCircle2, Download, AlertTriangle, Plus, Search, Play, Trash2 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { type CaptionSegment, type CaptionWord } from "@/lib/pipeline"
+import { KineticCaptionOverlay, SimpleCaptionOverlay } from "./caption-overlays"
 
 interface PostUploadWorkspaceProps {
   uploadId: string
@@ -57,6 +58,8 @@ export function PostUploadWorkspace({ uploadId }: PostUploadWorkspaceProps) {
   const [jobMessage, setJobMessage] = useState<string | null>(null)
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null)
   const [captionSegments, setCaptionSegments] = useState<CaptionSegment[]>([])
+  // Store the base, user-edited segments (never chunked)
+  const baseSegmentsRef = useRef<CaptionSegment[]>([])
   const [selectedSegmentId, setSelectedSegmentId] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState("")
   const [currentTime, setCurrentTime] = useState(0)
@@ -97,6 +100,7 @@ export function PostUploadWorkspace({ uploadId }: PostUploadWorkspaceProps) {
         const templatedSegments = reshapeSegmentsForTemplate(normalizedSegments, resolvedTemplate.renderTemplate, resolvedTemplate.id)
 
         setPreview(payload as PreviewSession)
+        baseSegmentsRef.current = normalizedSegments
         setCaptionSegments(templatedSegments)
         setTranscriptId(payload?.transcript?.id ?? null)
         setSelectedTemplate(resolvedTemplate.id)
@@ -212,7 +216,8 @@ export function PostUploadWorkspace({ uploadId }: PostUploadWorkspaceProps) {
     if (!template) return
 
     setSelectedTemplate(templateId)
-    setCaptionSegments((segments) => reshapeSegmentsForTemplate(segments, template.renderTemplate, template.id))
+    // Always reshape from baseSegmentsRef (user-edited, never chunked)
+    setCaptionSegments(reshapeSegmentsForTemplate(baseSegmentsRef.current, template.renderTemplate, template.id))
     setTemplateStatus("Applying template...")
     setJobMessage(null)
     setIsApplyingTemplate(true)
@@ -244,21 +249,38 @@ export function PostUploadWorkspace({ uploadId }: PostUploadWorkspaceProps) {
   }
 
   const handleSegmentChange = (segmentId: string, patch: Partial<CaptionSegment>) => {
-    setCaptionSegments((segments) =>
-      segments.map((segment) =>
+    setCaptionSegments((segments) => {
+      // Update both the current segments and the base segments
+      const updated = segments.map((segment) =>
         segment.id === segmentId
           ? {
               ...segment,
               ...patch,
             }
           : segment,
-      ),
-    )
+      )
+      // If not currently using kinetic template, update baseSegmentsRef
+      const selectedTemplateObj = defaultTemplates.find((t) => t.id === selectedTemplate)
+      const isKinetic = selectedTemplateObj?.id === "creator-kinetic" || selectedTemplateObj?.renderTemplate === "karaoke"
+      if (!isKinetic) {
+        baseSegmentsRef.current = updated
+      } else {
+        // For kinetic, update baseSegmentsRef by mapping chunked segments back to originals
+        // This is a best-effort: if chunked, only update matching originals
+        // (Assumes chunked segment ids contain original id as prefix)
+        const originals = baseSegmentsRef.current.map((orig) => {
+          const match = updated.find((seg) => String(seg.id).startsWith(String(orig.id)))
+          return match ? { ...orig, ...patch } : orig
+        })
+        baseSegmentsRef.current = originals
+      }
+      return updated
+    })
   }
 
   const handleSegmentTimingChange = (segmentId: string, field: "start" | "end", value: number) => {
-    setCaptionSegments((segments) =>
-      segments.map((segment) => {
+    setCaptionSegments((segments) => {
+      const updated = segments.map((segment) => {
         if (segment.id !== segmentId) return segment
         if (field === "start") {
           const start = Math.max(0, value)
@@ -267,8 +289,21 @@ export function PostUploadWorkspace({ uploadId }: PostUploadWorkspaceProps) {
         }
         const end = Math.max(value, segment.start + 0.1)
         return { ...segment, end }
-      }),
-    )
+      })
+      // Update baseSegmentsRef as above
+      const selectedTemplateObj = defaultTemplates.find((t) => t.id === selectedTemplate)
+      const isKinetic = selectedTemplateObj?.id === "creator-kinetic" || selectedTemplateObj?.renderTemplate === "karaoke"
+      if (!isKinetic) {
+        baseSegmentsRef.current = updated
+      } else {
+        const originals = baseSegmentsRef.current.map((orig) => {
+          const match = updated.find((seg) => String(seg.id).startsWith(String(orig.id)))
+          return match ? { ...orig, ...match } : orig
+        })
+        baseSegmentsRef.current = originals
+      }
+      return updated
+    })
   }
 
   const handleAddSegment = () => {
@@ -281,13 +316,21 @@ export function PostUploadWorkspace({ uploadId }: PostUploadWorkspaceProps) {
       end,
       text: "New caption",
     }
-    setCaptionSegments((segments) => [...segments, newSegment])
+    // Always add to baseSegmentsRef
+    baseSegmentsRef.current = [...baseSegmentsRef.current, newSegment]
+    // Reshape from baseSegmentsRef for current template
+    const selectedTemplateObj = defaultTemplates.find((t) => t.id === selectedTemplate)
+    setCaptionSegments(reshapeSegmentsForTemplate(baseSegmentsRef.current, selectedTemplateObj?.renderTemplate, selectedTemplateObj?.id))
     setSelectedSegmentId(newSegment.id)
     setCurrentTime(start)
   }
 
   const handleDeleteSegment = (segmentId: string) => {
-    setCaptionSegments((segments) => segments.filter((segment) => segment.id !== segmentId))
+    // Remove from baseSegmentsRef
+    baseSegmentsRef.current = baseSegmentsRef.current.filter((segment) => segment.id !== segmentId)
+    // Reshape from baseSegmentsRef for current template
+    const selectedTemplateObj = defaultTemplates.find((t) => t.id === selectedTemplate)
+    setCaptionSegments(reshapeSegmentsForTemplate(baseSegmentsRef.current, selectedTemplateObj?.renderTemplate, selectedTemplateObj?.id))
     if (selectedSegmentId === segmentId) {
       setSelectedSegmentId(null)
     }
@@ -537,20 +580,35 @@ export function PostUploadWorkspace({ uploadId }: PostUploadWorkspaceProps) {
 
             <div className="mt-6 rounded-[32px] border border-border/60 bg-background/40 p-4">
               {preview?.video.url ? (
-                <VideoPlayer
-                  videoUrl={preview.video.url}
-                  currentTime={currentTime}
-                  onTimeChange={setCurrentTime}
-                  captions={captionsForPlayer}
-                  className="p-0 bg-transparent"
-                  frameClassName="aspect-[9/16] max-w-xs md:max-w-sm mx-auto rounded-[28px] border border-border bg-black shadow-2xl"
-                  templatePreviewId={selectedTemplate}
-                  templateStyle={selectedTemplateOption.renderTemplate}
-                />
+                <div className="relative aspect-[9/16] max-w-xs md:max-w-sm mx-auto rounded-[28px] border border-border bg-black shadow-2xl overflow-hidden">
+                  <video
+                    src={preview.video.url}
+                    controls
+                    className="w-full h-full object-contain"
+                    onTimeUpdate={e => setCurrentTime(e.currentTarget.currentTime)}
+                    onLoadedMetadata={e => setCurrentTime(0)}
+                  />
+                  {/* Caption overlay for Creator Kinetics */}
+                  {selectedTemplate === "creator-kinetic" && (
+                    <KineticCaptionOverlay
+                      segments={captionsForPlayer}
+                      currentTime={currentTime}
+                    />
+                  )}
+                  {/* Caption overlay for Documentary (simple) */}
+                  {selectedTemplate === "documentary" && (
+                    <SimpleCaptionOverlay
+                      segments={captionsForPlayer}
+                      currentTime={currentTime}
+                    />
+                  )}
+                </div>
               ) : (
                 <div className="aspect-[9/16] max-w-sm mx-auto rounded-[28px] border border-dashed border-border/70 bg-muted/40" />
               )}
             </div>
+
+
 
             <div className="mt-6 space-y-3">
               <div>

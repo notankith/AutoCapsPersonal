@@ -27,20 +27,26 @@ export const Templates: Record<string, CaptionTemplate> = {
   },
   karaoke: {
     name: "CreatorKinetic",
-    fontFamily: "Retro Dream Display Free Demo",
-    fontSize: 68,
+    fontFamily: "THEBOLDFONT-FREEVERSION",
+    // Reduced by 15% (was 68), set to 58 to scale the text down
+    fontSize: 58,
     primaryColor: "#FFFFFF",
     outlineColor: "#000000",
-    outlineWidth: 6,
+    // Thin stroke: reduce from 6 to 1 to make the black outline much thinner
+    outlineWidth: 2,
+    // Removed drop shadow to eliminate the shadow behind text for Creator Kinetic
     shadowColor: "#000000",
-    shadowWidth: 12,
+    shadowWidth: 0,
+    // Remove the default yellow highlight for creator-kinetic and instead use a cycling
+    // highlight color sequence for each 2 chunks (adjust cycleAfterChunks as needed)
+    karaoke: {
+      highlightColors: ["#70e2ff", "#ffe83f", "#9fff5b"],
+      cycleAfterChunks: 2,
+      mode: "word",
+    },
     alignment: 5,
     marginV: 50,
     uppercase: true,
-    karaoke: {
-      highlightColor: "#FFFF40",
-      mode: "word",
-    },
   },
   sportGlow: {
     name: "SportGlow",
@@ -62,23 +68,6 @@ export const Templates: Record<string, CaptionTemplate> = {
 }
 
 export const defaultTemplates: TemplateOption[] = [
-  {
-    id: "modern-bold",
-    name: "Modern Bold",
-    description: "High-contrast title cards plus bold, centered captions.",
-    accent: "#8b5cf6",
-    background: "linear-gradient(135deg, #8b5cf6 0%, #ec4899 100%)",
-    badge: "Popular",
-    renderTemplate: "glowy",
-  },
-  {
-    id: "minimal-clean",
-    name: "Minimal Clean",
-    description: "Lightweight lower-thirds with system fonts and subtle fades.",
-    accent: "#10b981",
-    background: "linear-gradient(120deg, #6ee7b7 0%, #3b82f6 100%)",
-    renderTemplate: "minimal",
-  },
   {
     id: "creator-kinetic",
     name: "Creator Kinetic",

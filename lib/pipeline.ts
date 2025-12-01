@@ -34,6 +34,19 @@ export type CaptionSegment = {
   words?: CaptionWord[]
 }
 
+export type RenderOverlay = {
+  url: string
+  start: number
+  end: number
+  // optional position/size hint in pixels
+  x?: number
+  y?: number
+  width?: number
+  height?: number
+  // Optional local path (worker downloads external files and sets this)
+  path?: string
+}
+
 const captionWordSchema = z.object({
   start: z.number(),
   end: z.number(),

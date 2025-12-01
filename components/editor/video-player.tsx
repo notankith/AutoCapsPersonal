@@ -39,6 +39,7 @@ export function VideoPlayer({
   const [isPlaying, setIsPlaying] = useState(false)
   const [duration, setDuration] = useState(0)
   const [isMuted, setIsMuted] = useState(false)
+  const [overlayTop, setOverlayTop] = useState<number | null>(null)
 
   useEffect(() => {
     const video = videoRef.current
@@ -89,6 +90,39 @@ export function VideoPlayer({
     return Templates[id] ?? Templates.minimal
   }, [templatePreviewId, templateStyle])
 
+  // Precompute overlay segments which contain the keywords 'money', 'rich', or 'wealth' (case-insensitive)
+  const overlaySegments = useMemo(
+    () => captions.filter((c) => /\b(money|rich|wealth)\b/i.test(c.text)),
+    [captions]
+  );
+
+  // Find active overlay for currentTime
+  const activeOverlay = useMemo(() => {
+    return overlaySegments.find((s) => currentTime >= (s.start ?? 0) && currentTime <= (s.end ?? 0))
+  }, [overlaySegments, currentTime])
+
+  // Compute overlay top position based on video size and template margin
+  useEffect(() => {
+    const video = videoRef.current
+    if (!video || !templateObj) {
+      setOverlayTop(null)
+      return
+    }
+
+    const computePos = () => {
+      const height = video.videoHeight || video.clientHeight || 720
+      let captionY = height - (templateObj.marginV ?? 40)
+      if ((templateObj as any).alignment === 5) {
+        captionY = height / 2
+      }
+      setOverlayTop(captionY)
+    }
+
+    computePos()
+    window.addEventListener("resize", computePos)
+    return () => window.removeEventListener("resize", computePos)
+  }, [videoRef, templateObj])
+
   return (
     <div className={cn("p-6 space-y-4 flex-1 flex flex-col bg-card/50", className)}>
       <div
@@ -104,6 +138,7 @@ export function VideoPlayer({
           videoRef={videoRef}
           captions={captions}
           template={templateObj}
+          onCaptionPosition={({ y }) => setOverlayTop(y)}
         />
 
         {/* Play Button Overlay */}
@@ -111,6 +146,23 @@ export function VideoPlayer({
           <Button size="lg" variant="ghost" className="absolute rounded-full" onClick={togglePlay}>
             <Play className="w-12 h-12 text-white fill-white" />
           </Button>
+        )}
+        {activeOverlay && (
+          <div
+            className="absolute left-4 z-30 pointer-events-none"
+            style={{
+              top: typeof overlayTop === "number" ? `${overlayTop}px` : overlayTop ?? "50%",
+              transform: "translateY(-50%)",
+              width: 220,
+              maxWidth: "25%",
+            }}
+          >
+            <img
+              src="https://raw.githubusercontent.com/notankith/cloudinarytest/refs/heads/main/Money.gif"
+              alt="overlay"
+              style={{ width: "100%", height: "auto", display: "block" }}
+            />
+          </div>
         )}
       </div>
 

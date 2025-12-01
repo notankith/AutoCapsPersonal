@@ -27,8 +27,10 @@ export const templateStyles: Record<string, TemplateStyle> = {
   },
   "creator-kinetic": {
     container: "bg-black/0",
-    wrapper: "bg-black/80 text-white border border-lime-400 shadow-[0_0_40px_rgba(57,255,20,0.5)]",
-    text: "text-2xl font-bold tracking-wide",
+    // Removed the green glow shadow from the wrapper to eliminate the shadow behind the text
+    wrapper: "bg-black/80 text-white border border-lime-400",
+    // Match the reduced font scale (58px) used in the creator-kinetic template
+    text: "text-[58px] font-bold tracking-wide",
     showWordBadges: true,
     wordPrimary: "bg-lime-400 text-black",
     wordSecondary: "bg-transparent text-white",

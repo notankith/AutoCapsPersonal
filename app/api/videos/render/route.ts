@@ -49,6 +49,18 @@ export async function POST(request: NextRequest) {
     const captionFile = buildCaptionFile(body.template, captionSource.segments)
     const captionBuffer = Buffer.from(captionFile.content, "utf-8")
 
+
+    let overlays: import("@/lib/pipeline").RenderOverlay[] = [];
+    if (body.template === "karaoke") {
+      const KEYWORD_OVERLAY_URL = "https://raw.githubusercontent.com/notankith/cloudinarytest/refs/heads/main/Money.gif";
+      overlays = captionSource.segments
+        .filter((s) => /(\brich\b|\bmoney\b|\bwealth\b)/i.test(s.text))
+        .map((s) => ({ url: KEYWORD_OVERLAY_URL, start: s.start, end: s.end, x: 0, width: 220 }));
+      console.log('[API] Overlay segments for money/rich/wealth (karaoke only):', overlays);
+    }
+
+    // overlays already computed above
+
     const basePayload = {
       template: body.template,
       resolution: body.resolution,
@@ -58,6 +70,7 @@ export async function POST(request: NextRequest) {
       captionPath: "",
       segmentsProvided: Boolean(body.segments?.length),
       segmentCount: captionSource.segments.length,
+      overlays: overlays,
     }
 
     // Create job
@@ -117,6 +130,8 @@ export async function POST(request: NextRequest) {
       expiresIn: "10m",
     })
 
+    // overlays already computed above
+
     const renderPayload = {
       jobId: job.id,
       uploadId: upload.id,
@@ -126,6 +141,7 @@ export async function POST(request: NextRequest) {
       template: body.template,
       resolution: body.resolution,
       outputPath: `${upload.user_id}/${job.id}/rendered.mp4`,
+      overlays,
     }
 
     // Send to worker (IMPORTANT: /render route restored)
@@ -174,12 +190,34 @@ async function resolveCaptionSource(
   userId: string,
   body: z.infer<typeof captionRequestSchema>,
 ) {
+
   if (body.segments?.length) {
+    // If karaoke template, normalize segments for per-word timings
+    if (body.template === "karaoke") {
+      const normalizedSegments = body.segments.map((segment) => {
+        // Always rebuild words array from text, ignore any provided words
+        const tokens = segment.text?.split(/\s+/) ?? [];
+        const duration = Math.max(0, Number(segment.end) - Number(segment.start));
+        const perToken = tokens.length ? duration / tokens.length : 0.2;
+        const words = tokens.map((token, i) => ({
+          text: token,
+          start: Number(segment.start) + perToken * i,
+          end: Number(segment.start) + perToken * (i + 1)
+        }));
+        return { ...segment, words };
+      });
+      return {
+        transcriptId: body.transcriptId ?? null,
+        translationId: body.translationId ?? null,
+        segments: sanitizeClientSegments(normalizedSegments),
+      };
+    }
+    // Otherwise, normal segment handling
     return {
       transcriptId: body.transcriptId ?? null,
       translationId: body.translationId ?? null,
       segments: sanitizeClientSegments(body.segments),
-    }
+    };
   }
 
   if (body.translationId) {

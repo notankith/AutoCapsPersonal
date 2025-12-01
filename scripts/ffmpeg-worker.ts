@@ -5,13 +5,13 @@ import { join, dirname } from "node:path"
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
 import jwt from "jsonwebtoken"
 import { createClient, type PostgrestError } from "@supabase/supabase-js"
-import { STORAGE_BUCKETS, RENDER_RESOLUTIONS, type CaptionTemplate } from "@/lib/pipeline"
+import { STORAGE_BUCKETS, RENDER_RESOLUTIONS, type CaptionTemplate, type RenderOverlay } from "@/lib/pipeline"
 import "dotenv/config"
 
 // FINAL AND ONLY FFmpeg BINARY
 const ffmpegBinary = process.env.FFMPEG_PATH || "ffmpeg"
 const CREATOR_KINETIC_FONT_PATH =
-  "D:\\VSCode Projects\\autocapsuiux-main\\RetroDream-DisplayFreeDemo.ttf"
+  "D:\\VSCode Projects\\autocapsuiux-main\\THEBOLDFONT-FREEVERSION.ttf"
 const CREATOR_KINETIC_FONT_DIR = dirname(CREATOR_KINETIC_FONT_PATH)
 
 type RenderJobPayload = {
@@ -25,6 +25,7 @@ type RenderJobPayload = {
   outputPath: string
   videoUrl?: string
   captionUrl?: string
+  overlays?: Array<{ url: string; start: number; end: number; x?: number; y?: number; width?: number; height?: number }>
 }
 
 const WORKER_SECRET = process.env.WORKER_JWT_SECRET
@@ -104,6 +105,8 @@ async function processJob(payload: RenderJobPayload) {
   const videoTmp = join(tmpdir(), `${jobId}-video`)
   const captionTmp = join(tmpdir(), `${jobId}-caption`)
   const outputTmp = join(tmpdir(), `${jobId}-render.mp4`)
+  // Overlay files will be downloaded into temp paths and cleaned up in finally
+  let overlayFiles: Array<RenderOverlay & { path?: string }> = []
 
   try {
     console.log("=== Getting Signed URLs ===")
@@ -121,6 +124,37 @@ async function processJob(payload: RenderJobPayload) {
     await downloadToFile(videoUrl, videoTmp)
     await downloadToFile(captionUrl, captionTmp)
 
+    // Get video duration using ffprobe after video is downloaded
+    const { getVideoDuration } = require("./ffprobe-helper")
+    const videoDuration = getVideoDuration(videoTmp)
+    console.log("[worker] Video duration:", videoDuration)
+
+    // Clamp overlays to video duration
+    if (Array.isArray(payload.overlays) && typeof videoDuration === "number") {
+      payload.overlays = payload.overlays.map((ov: any) => ({
+        ...ov,
+        end: Math.min(ov.end, videoDuration)
+      }))
+    }
+
+    // Download overlays (if any) to local temp files for ffmpeg input
+    overlayFiles = []
+    if (payload.overlays && payload.overlays.length) {
+      for (let i = 0; i < payload.overlays.length; i++) {
+        const ov = payload.overlays[i]
+        try {
+          // Try to derive extension from URL (default to .gif)
+          const extMatch = (ov.url || "").match(/\.(gif|webp|png|mp4)(?:$|[?#])/i)
+          const ext = extMatch ? extMatch[1] : "gif"
+          const overlayTmp = join(tmpdir(), `${jobId}-overlay-${i}.${ext}`)
+          await downloadToFile(ov.url, overlayTmp)
+          overlayFiles.push({ url: ov.url, path: overlayTmp, start: ov.start, end: ov.end, x: ov.x, y: ov.y, width: ov.width, height: ov.height })
+        } catch (err) {
+          console.warn(`[worker] Failed to download overlay ${ov.url} — skipping`, err)
+        }
+      }
+    }
+
     console.log("[worker] Downloaded inputs, launching FFmpeg", { jobId })
     await runFfmpeg(
       videoTmp,
@@ -129,6 +163,7 @@ async function processJob(payload: RenderJobPayload) {
       payload.captionFormat,
       payload.template,
       `${resolution.width}x${resolution.height}`
+      , overlayFiles
     )
 
     const file = await fs.readFile(outputTmp)
@@ -191,6 +226,12 @@ async function processJob(payload: RenderJobPayload) {
     await safeUnlink(videoTmp)
     await safeUnlink(captionTmp)
     await safeUnlink(outputTmp)
+    // cleanup overlays
+    if (Array.isArray(overlayFiles) && overlayFiles.length) {
+      for (const f of overlayFiles) {
+        if (f.path) await safeUnlink(f.path as string)
+      }
+    }
   }
 }
 
@@ -265,61 +306,121 @@ function runFfmpeg(
   fmt: "srt" | "ass",
   template: CaptionTemplate,
   _res: string,
+  overlays: RenderOverlay[] = [],
 ) {
+  // Center captions in the middle of the video using ASS alignment override (align=2)
   const forceStyle =
     template === "minimal"
-      ? "Fontname=Inter,Fontsize=40,PrimaryColour=&H00FFFFFF&,OutlineColour=&H00000000&,BackColour=&H64000000&,BorderStyle=4"
-      : null
+      ? "Fontname=Inter,Fontsize=40,PrimaryColour=&H00FFFFFF&,OutlineColour=&H00000000&,BackColour=&H64000000&,BorderStyle=4,Alignment=2"
+      : "Alignment=2";
 
-  const escapedCaptions = escapeFilterPath(captions)
-  const escapedFontsDir = escapeFilterPath(CREATOR_KINETIC_FONT_DIR)
+  const escapedCaptions = escapeFilterPath(captions);
+  const escapedFontsDir = escapeFilterPath(CREATOR_KINETIC_FONT_DIR);
 
-  const filter = (() => {
-    const baseFilters: string[] = []
+  // Build subtitles filter string
+  const subtitlesFilter = (() => {
     if (fmt === "ass") {
-      const fontsDirParam = template === "karaoke" ? `:fontsdir=${escapedFontsDir}` : ""
-      baseFilters.push(`subtitles='${escapedCaptions}${fontsDirParam}'`)
+      const fontsDirParam = template === "karaoke" ? `:fontsdir=${escapedFontsDir}` : "";
+      return `subtitles='${escapedCaptions}${fontsDirParam}'`;
     } else if (forceStyle) {
-      baseFilters.push(`subtitles='${escapedCaptions}:force_style=${forceStyle}'`)
+      return `subtitles='${escapedCaptions}:force_style=${forceStyle}'`;
     } else {
-      baseFilters.push(`subtitles='${escapedCaptions}'`)
+      return `subtitles='${escapedCaptions}'`;
     }
-    baseFilters.push("fps=30", "format=yuv420p")
-    return baseFilters.join(",")
-  })()
+  })();
+  // Always apply overlays first, then subtitles, then fps/format
+  const args: string[] = [];
+  if (!overlays || overlays.length === 0) {
+    const filterComplex = `[0:v]fps=30,format=yuv420p[base];[base]${subtitlesFilter}[final]`;
+    console.log("[worker] FFmpeg filter_complex:", filterComplex);
+    try {
+      const assPreview = require('fs').readFileSync(captions, 'utf-8').split('\n').slice(0, 20).join('\n');
+      console.log("[worker] ASS file preview:\n", assPreview);
+    } catch (e) {
+      console.warn("[worker] Could not read ASS file for preview", e);
+    }
+    args.push(
+      "-y",
+      "-i", video,
+      "-filter_complex", filterComplex,
+      "-map", "[final]",
+      "-map", "0:a?",
+      "-c:v", "libx264",
+      "-profile:v", "high",
+      "-level", "4.1",
+      "-pix_fmt", "yuv420p",
+      "-preset", "medium",
+      "-crf", "18",
+      "-r", "30",
+      "-movflags", "+faststart",
+      "-c:a", "aac",
+      "-b:a", "192k",
+      "-ar", "48000",
+      "-ac", "2",
+      "-shortest",
+      out
+    );
+  } else {
+    args.push("-y", "-i", video);
+    overlays.forEach((ov) => {
+      const input = (ov as any).path ?? ov.url;
+      args.push("-stream_loop", "-1", "-i", String(input));
+    });
+    // Build filter_complex string
+    const filterParts: string[] = [];
+    filterParts.push(`[0:v]fps=30,format=yuv420p[base]`);
+    overlays.forEach((ov, i) => {
+      const inputIndex = i + 1;
+      const scaledLabel = `ovsc${i}`;
+      const start = Math.max(0, ov.start);
+      const end = Math.max(start, ov.end);
+      // Scale GIF to 80px width
+      const width = 80;
+      filterParts.push(`[${inputIndex}:v] scale=${width}:-1 [${scaledLabel}]`);
+      // Always position GIF at extreme left (x=0)
+      let x = 0;
+      let y = `(main_h/2)-(overlay_h/2)`;
+      // For karaoke, center vertically; for others, position lower
+      if (template !== "karaoke") {
+        y = `main_h-overlay_h-120`;
+      }
+      const prevLabel = i === 0 ? "base" : `v${i}`;
+      const outLabel = `v${i + 1}`;
+      const enable = `between(t,${start},${end})`;
+      filterParts.push(`[${prevLabel}][${scaledLabel}] overlay=${x}:${y}:enable='${enable}' [${outLabel}]`);
+    });
+    // After all overlays, apply subtitles strictly last
+    const overlayFinalLabel = overlays.length ? `v${overlays.length}` : "base";
+    filterParts.push(`[${overlayFinalLabel}]${subtitlesFilter}[final]`);
+    const filterComplex = filterParts.join(";");
 
-  const args = [
-    "-y",
-    "-i",
-    video,
-    "-vf",
-    filter,
-    "-c:v",
-    "libx264",
-    "-profile:v",
-    "high",
-    "-level",
-    "4.1",
-    "-pix_fmt",
-    "yuv420p",
-    "-preset",
-    "medium",
-    "-crf",
-    "18",
-    "-r",
-    "30",
-    "-movflags",
-    "+faststart",
-    "-c:a",
-    "aac",
-    "-b:a",
-    "192k",
-    "-ar",
-    "48000",
-    "-ac",
-    "2",
-    out,
-  ]
+    console.log("[worker] FFmpeg filter_complex:", filterComplex);
+    try {
+      const assPreview = require('fs').readFileSync(captions, 'utf-8').split('\n').slice(0, 20).join('\n');
+      console.log("[worker] ASS file preview:\n", assPreview);
+    } catch (e) {
+      console.warn("[worker] Could not read ASS file for preview", e);
+    }
+    args.push(
+      "-filter_complex", filterComplex,
+      "-map", "[final]",
+      "-map", "0:a?",
+      "-c:v", "libx264",
+      "-profile:v", "high",
+      "-level", "4.1",
+      "-pix_fmt", "yuv420p",
+      "-preset", "medium",
+      "-crf", "18",
+      "-r", "30",
+      "-movflags", "+faststart",
+      "-c:a", "aac",
+      "-b:a", "192k",
+      "-ar", "48000",
+      "-ac", "2",
+      "-shortest",
+      out
+    );
+  }
 
   return new Promise<void>((resolve, reject) => {
     const ff = spawn(ffmpegBinary, args) as ChildProcessWithoutNullStreams
@@ -341,25 +442,22 @@ function readBody(req: any): Promise<string> {
   })
 }
 
+// Helper to escape paths used inside FFmpeg filter expressions
 function escapeFilterPath(path: string) {
   return path.replace(/\\/g, "/").replace(/:/g, "\\:").replace(/ /g, "\\ ")
 }
 
+// Retrieve a signed URL for a storage object if one is not already provided
 async function ensureSignedUrl(url: string | undefined, bucket: string, path: string) {
   if (url) return url
   if (!path) throw new Error("Missing storage path")
 
-  console.log("Signing:", bucket, path)
-
   const { data, error } = await supabase.storage.from(bucket).createSignedUrl(path, 60 * 60 * 4)
-  if (data?.signedUrl) {
-    return data.signedUrl
-  }
+  if (data?.signedUrl) return data.signedUrl
 
   const pub = supabase.storage.from(bucket).getPublicUrl(path)
-  if (pub.data.publicUrl) {
-    return pub.data.publicUrl
-  }
+  if (pub.data?.publicUrl) return pub.data.publicUrl
 
   throw new Error(`Unable to sign asset: ${path} (${error?.message ?? "unknown"})`)
 }
+

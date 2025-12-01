@@ -28,7 +28,18 @@ export type CaptionFile = {
 }
 
 export function buildCaptionFile(templateId: CaptionTemplateId, segments: CaptionSegment[]): CaptionFile {
-  const normalized = ensureWordTimings(segments)
+  let normalized = ensureWordTimings(segments)
+  // Optionally clamp segment end times if a duration is provided
+  if (typeof segments !== "undefined" && segments.length > 0) {
+    const maxEnd = Math.max(...segments.map(s => s.end))
+    // If segments extend past video duration, clamp them
+    if (typeof (global as any).videoDuration === "number" && maxEnd > (global as any).videoDuration) {
+      normalized = normalized.map(seg => ({
+        ...seg,
+        end: Math.min(seg.end, (global as any).videoDuration)
+      }))
+    }
+  }
   const template = Templates[templateId]
 
   if (!template) {
@@ -65,10 +76,13 @@ function generateSimpleEvents(template: CaptionTemplate, segments: CaptionSegmen
 }
 
 function generateKaraokeEvents(template: CaptionTemplate, segments: CaptionSegment[]): string {
-  const highlightColorAss = toAssColor(template.karaoke?.highlightColor ?? "#FFFF00")
+  // Build the highlight color array; allow cycling if highlightColors is provided
+  const highlightColors = template.karaoke?.highlightColors ?? (template.karaoke?.highlightColor ? [template.karaoke.highlightColor] : ["#FFFF00"]) 
+  const cycleAfter = template.karaoke?.cycleAfterChunks ?? 2
   const baseColorAss = toAssColor(template.primaryColor)
   const outlineColorAss = toAssColor(template.outlineColor)
 
+  let globalChunkIndex = 0
   return segments
     .map((segment) => {
       if (!segment.words?.length) return "" // Skip or handle empty words
@@ -92,6 +106,10 @@ function generateKaraokeEvents(template: CaptionTemplate, segments: CaptionSegme
 
           const chunkZoomIn = `\\t(0,80,\\fscx105\\fscy105)\\t(80,160,\\fscx100\\fscy100)`
 
+          // decide color for this chunk based on globalChunkIndex and cycle size
+          const colorIndex = Math.floor(globalChunkIndex / cycleAfter) % highlightColors.length
+          const highlightColorAss = toAssColor(highlightColors[colorIndex])
+
           const sentence = chunk
             .map((word) => {
               const rel = Math.round((word.start - chunkStart) * 1000)
@@ -110,6 +128,7 @@ function generateKaraokeEvents(template: CaptionTemplate, segments: CaptionSegme
             .join(" ")
 
           const lineBreak = ci === 0 ? "" : "\\N"
+          globalChunkIndex++
           return `Dialogue: 0,${formatAssTimestamp(chunkStart)},${formatAssTimestamp(chunkEnd)},${template.name},,0,0,0,,${lineBreak}${sentence}`
         })
         .join("\n")

@@ -8,9 +8,10 @@ interface CanvasCaptionRendererProps {
   videoRef: React.RefObject<HTMLVideoElement>
   captions: CaptionSegment[]
   template: CaptionTemplate
+  onCaptionPosition?: (pos: { y: number; height: number }) => void
 }
 
-export function CanvasCaptionRenderer({ videoRef, captions, template }: CanvasCaptionRendererProps) {
+export function CanvasCaptionRenderer({ videoRef, captions, template, onCaptionPosition }: CanvasCaptionRendererProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
 
   useEffect(() => {
@@ -43,8 +44,22 @@ export function CanvasCaptionRenderer({ videoRef, captions, template }: CanvasCa
         }
       )
 
-      if (activeCaption) {
-        drawCaption(ctx, activeCaption, template, currentTime, canvas.width, canvas.height)
+          if (activeCaption) {
+            // Compute global chunk start index (sum of chunk counts for captions before the active one)
+            const computeChunkCount = (wCount: number) => Math.ceil(Math.max(0, wCount) / 3)
+            const priorChunks = captions
+              .filter((c) => c.start !== undefined && ((c as any).start ?? 0) < ((activeCaption as any).start ?? 0))
+              .reduce((acc, c) => acc + computeChunkCount(c.words?.length ?? (c.text?.split(/\s+/).filter(Boolean).length ?? 0)), 0)
+
+            drawCaption(ctx, activeCaption, template, currentTime, canvas.width, canvas.height, priorChunks)
+            // compute caption baseline y to help overlay positioning
+            const { marginV, alignment, fontSize } = template as any
+            let y = canvas.height - (marginV ?? 40)
+            if (alignment === 5) y = canvas.height / 2
+            if (alignment === 8) y = marginV ?? 40
+            if (typeof onCaptionPosition === 'function') {
+              onCaptionPosition({ y, height: fontSize ?? 40 })
+            }
       }
 
       animationFrameId = requestAnimationFrame(render)
@@ -70,6 +85,7 @@ function drawCaption(
   currentTime: number,
   width: number,
   height: number
+  , globalChunkStart = 0
 ) {
   const {
     fontFamily,
@@ -195,6 +211,15 @@ function drawCaption(
       const elapsed = currentTime - wm.word.start
       const progress = Math.max(0, Math.min(1, elapsed / wordDuration))
 
+      // Determine highlight color for the chunk this word belongs to
+      const wordIndex = i
+      const chunkIndexInCaption = Math.floor(wordIndex / 3)
+      const globalChunkIndex = globalChunkStart + chunkIndexInCaption
+      const highlightColors = karaoke.highlightColors ?? (karaoke.highlightColor ? [karaoke.highlightColor] : ["#FFFF00"])
+      const cycleAfter = karaoke.cycleAfterChunks ?? 2
+      const colorIndex = Math.floor(globalChunkIndex / cycleAfter) % highlightColors.length
+      const highlightColor = highlightColors[colorIndex]
+
       if (progress > 0) {
         ctx.save()
         // Create clipping region for the highlight
@@ -207,7 +232,7 @@ function drawCaption(
         ctx.rect(fillX, clipY - fontSize/2, wm.width * progress, clipHeight * 2) // Generous clip area
         ctx.clip()
 
-        ctx.fillStyle = karaoke.highlightColor
+        ctx.fillStyle = highlightColor
         ctx.fillText(wm.text, fillX, y)
         ctx.restore()
       }
