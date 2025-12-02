@@ -1,16 +1,18 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useState, useRef } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-// import { VideoPlayer } from "./video-player"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { TemplateSelector } from "./template-selector"
 import { type TemplateOption } from "@/components/templates/types"
 import { defaultTemplates, findTemplateById } from "@/components/templates/data"
-import { Loader2, Layers, CheckCircle2, Download, AlertTriangle, Plus, Search, Play, Trash2 } from "lucide-react"
+import { Download, Pause, Play, Plus, Search, Trash2, Copy } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { type CaptionSegment, type CaptionWord } from "@/lib/pipeline"
-import { KineticCaptionOverlay, SimpleCaptionOverlay } from "./caption-overlays"
+import { SimpleCaptionOverlay } from "./caption-overlays"
+import { CreatorKineticOverlay, type OverlayConfig } from "./creator-kinetic-overlay"
+import { type KineticWord } from "./kinetic-caption-utils"
 
 interface PostUploadWorkspaceProps {
   uploadId: string
@@ -50,27 +52,78 @@ export function PostUploadWorkspace({ uploadId }: PostUploadWorkspaceProps) {
   const [isPreviewLoading, setIsPreviewLoading] = useState(true)
   const [previewError, setPreviewError] = useState<string | null>(null)
   const [selectedTemplate, setSelectedTemplate] = useState<string>(defaultTemplates[0].id)
-  const [templateStatus, setTemplateStatus] = useState<string | null>(null)
   const [isApplyingTemplate, setIsApplyingTemplate] = useState(false)
   const [isDispatchingRender, setIsDispatchingRender] = useState(false)
   const [jobId, setJobId] = useState<string | null>(null)
   const [jobStatus, setJobStatus] = useState<string | null>(null)
   const [jobMessage, setJobMessage] = useState<string | null>(null)
+  const [jobProgress, setJobProgress] = useState<number | null>(null)
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null)
   const [captionSegments, setCaptionSegments] = useState<CaptionSegment[]>([])
-  // Store the base, user-edited segments (never chunked)
   const baseSegmentsRef = useRef<CaptionSegment[]>([])
   const [selectedSegmentId, setSelectedSegmentId] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState("")
   const [currentTime, setCurrentTime] = useState(0)
   const [isSavingTranscript, setIsSavingTranscript] = useState(false)
   const [saveFeedback, setSaveFeedback] = useState<{ variant: "success" | "error"; message: string } | null>(null)
-
   const [transcriptId, setTranscriptId] = useState<string | null>(null)
+  const [copyFeedback, setCopyFeedback] = useState<string | null>(null)
+  const [showExportModal, setShowExportModal] = useState(false)
+  const [overlayConfig, setOverlayConfig] = useState<OverlayConfig>(createDefaultOverlayConfig())
+  const [videoDuration, setVideoDuration] = useState(0)
+  const [videoResolution, setVideoResolution] = useState<{ width: number; height: number } | null>(null)
+  const videoRef = useRef<HTMLVideoElement>(null)
+  const [isVideoPlaying, setIsVideoPlaying] = useState(false)
 
-  const selectedTemplateOption =
-    defaultTemplates.find((t) => t.id === selectedTemplate) ?? defaultTemplates[0]
-  const previewLanguage = preview?.transcript.language ?? preview?.upload.language ?? "en"
+  const previewLanguage = preview?.transcript?.language ?? preview?.upload?.language ?? "en"
+  const selectedTemplateOption = useMemo(
+    () => defaultTemplates.find((template) => template.id === selectedTemplate) ?? defaultTemplates[0],
+    [selectedTemplate],
+  )
+
+  const captionsForPlayer = useMemo(() => captionSegments, [captionSegments])
+  const previewTitle = preview?.upload.title ?? "Preparing video..."
+  const sliderMax = useMemo(() => {
+    if (videoDuration > 0) return videoDuration
+    if (preview?.video?.durationSeconds) return preview.video.durationSeconds
+    return captionSegments.at(-1)?.end ?? 0
+  }, [captionSegments, preview?.video?.durationSeconds, videoDuration])
+
+  const videoAspectRatio = useMemo(() => {
+    if (videoResolution?.width && videoResolution?.height && videoResolution.width > 0 && videoResolution.height > 0) {
+      return Number((videoResolution.width / videoResolution.height).toFixed(4))
+    }
+    return 9 / 16
+  }, [videoResolution])
+
+  const playbackProgress = sliderMax > 0 ? Math.min(1, currentTime / sliderMax) : 0
+  const formattedCurrentTime = formatTimestamp(currentTime)
+  const formattedTotalDuration = formatTimestamp(sliderMax)
+
+  const seekToTime = useCallback((time: number) => {
+    const safeDuration = sliderMax || videoRef.current?.duration || 0
+    const clamped = Math.max(0, Math.min(time, safeDuration))
+    if (videoRef.current && !Number.isNaN(videoRef.current.duration)) {
+      videoRef.current.currentTime = clamped
+    }
+    setCurrentTime(clamped)
+  }, [sliderMax])
+
+  const handleOverlayConfigChange = useCallback((config: OverlayConfig) => {
+    setOverlayConfig(config)
+  }, [])
+
+  const invalidateRender = useCallback(() => {
+    setDownloadUrl(null)
+    setJobId(null)
+    setJobStatus(null)
+    setJobProgress(null)
+    setJobMessage(null)
+  }, [])
+
+  const persistSegmentsToBase = useCallback((segments: CaptionSegment[]) => {
+    baseSegmentsRef.current = mergeChunkedSegments(segments)
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -143,7 +196,21 @@ export function PostUploadWorkspace({ uploadId }: PostUploadWorkspaceProps) {
     }
   }, [captionSegments, currentTime, selectedSegmentId])
 
-  const captionsForPlayer = captionSegments
+  useEffect(() => {
+    if (!copyFeedback) return
+    const timeout = window.setTimeout(() => setCopyFeedback(null), 2000)
+    return () => window.clearTimeout(timeout)
+  }, [copyFeedback])
+
+  const overlayKineticWords = useMemo<KineticWord[]>(() => {
+    return captionSegments
+      .flatMap((segment) => ensureSegmentWords(segment))
+      .map((word) => ({
+        text: word.text,
+        startSec: word.start,
+        endSec: word.end,
+      }))
+  }, [captionSegments])
 
   const sortedSegments = useMemo(() => [...captionSegments].sort((a, b) => a.start - b.start), [captionSegments])
 
@@ -170,8 +237,28 @@ export function PostUploadWorkspace({ uploadId }: PostUploadWorkspaceProps) {
       setJobMessage("Queuing render job...")
       setJobStatus("queued")
       setDownloadUrl(null)
+      setJobProgress(0)
 
       try {
+        // Calculate custom styles for export
+        // Map percentage position (y) to ASS MarginV (pixels)
+        // We use Alignment 2 (Bottom Center) for export to handle vertical offset reliably
+        
+        const playResX = videoResolution?.width ?? 1920
+        const playResY = videoResolution?.height ?? 1080
+
+        // Font Size Calculation:
+        // In Preview: FontSize = 58 * (VideoWidth / 1920) * Scale
+        // In ASS: FontSize is relative to PlayResY (usually).
+        // If we set PlayResX/Y to match VideoWidth/Height, then the coordinate system matches the video.
+        // So we want the font size to be the same fraction of the width.
+        // TargetFontSize = 58 * (VideoWidth / 1920) * Scale.
+        const targetFontSize = 58 * (playResX / 1920) * overlayConfig.scale
+        
+        // Formula: MarginV = (100 - y%) * (PlayResY / 100) - (Approx Half Text Height)
+        // We approximate half text height as fontSize/2 to center the text at the y-coordinate
+        const marginV = Math.max(0, Math.round((100 - overlayConfig.y) * (playResY / 100) - (targetFontSize / 2)))
+
         const payload = {
           uploadId,
           template: template.renderTemplate,
@@ -183,6 +270,13 @@ export function PostUploadWorkspace({ uploadId }: PostUploadWorkspaceProps) {
             text: segment.text,
             words: segment.words,
           })),
+          customStyles: {
+            fontSize: Math.round(targetFontSize),
+            alignment: 2,
+            marginV: marginV,
+            playResX,
+            playResY,
+          },
           ...(transcriptId ? { transcriptId } : {}),
         }
 
@@ -203,22 +297,23 @@ export function PostUploadWorkspace({ uploadId }: PostUploadWorkspaceProps) {
       } catch (err) {
         setJobStatus("failed")
         setJobMessage(err instanceof Error ? err.message : "Render failed.")
+        setJobProgress(null)
         throw err
       } finally {
         setIsDispatchingRender(false)
       }
     },
-    [uploadId, captionSegments, transcriptId]
+    [uploadId, captionSegments, transcriptId, overlayConfig, videoResolution]
   )
 
   const handleTemplateSelect = async (templateId: string) => {
     const template = defaultTemplates.find((t) => t.id === templateId)
     if (!template) return
 
+    invalidateRender()
     setSelectedTemplate(templateId)
     // Always reshape from baseSegmentsRef (user-edited, never chunked)
     setCaptionSegments(reshapeSegmentsForTemplate(baseSegmentsRef.current, template.renderTemplate, template.id))
-    setTemplateStatus("Applying template...")
     setJobMessage(null)
     setIsApplyingTemplate(true)
 
@@ -234,7 +329,6 @@ export function PostUploadWorkspace({ uploadId }: PostUploadWorkspaceProps) {
         throw new Error(p.error ?? "Failed to save template selection")
       }
 
-      setTemplateStatus("Template applied. Preview updated — click Export & Download when ready.")
       setDownloadUrl(null)
       setJobMessage("Template updated. Click Export & Download to burn captions.")
       if (jobId) {
@@ -242,7 +336,7 @@ export function PostUploadWorkspace({ uploadId }: PostUploadWorkspaceProps) {
         setJobStatus(null)
       }
     } catch (err) {
-      setTemplateStatus(err instanceof Error ? err.message : "Could not update template.")
+      setJobMessage(err instanceof Error ? err.message : "Could not update template.")
     } finally {
       setIsApplyingTemplate(false)
     }
@@ -251,29 +345,35 @@ export function PostUploadWorkspace({ uploadId }: PostUploadWorkspaceProps) {
   const handleSegmentChange = (segmentId: string, patch: Partial<CaptionSegment>) => {
     setCaptionSegments((segments) => {
       // Update both the current segments and the base segments
-      const updated = segments.map((segment) =>
-        segment.id === segmentId
-          ? {
-              ...segment,
-              ...patch,
-            }
-          : segment,
-      )
-      // If not currently using kinetic template, update baseSegmentsRef
-      const selectedTemplateObj = defaultTemplates.find((t) => t.id === selectedTemplate)
-      const isKinetic = selectedTemplateObj?.id === "creator-kinetic" || selectedTemplateObj?.renderTemplate === "karaoke"
-      if (!isKinetic) {
-        baseSegmentsRef.current = updated
-      } else {
-        // For kinetic, update baseSegmentsRef by mapping chunked segments back to originals
-        // This is a best-effort: if chunked, only update matching originals
-        // (Assumes chunked segment ids contain original id as prefix)
-        const originals = baseSegmentsRef.current.map((orig) => {
-          const match = updated.find((seg) => String(seg.id).startsWith(String(orig.id)))
-          return match ? { ...orig, ...patch } : orig
-        })
-        baseSegmentsRef.current = originals
-      }
+      const updated = segments.map((segment) => {
+        if (segment.id !== segmentId) return segment
+
+        // If text is changing, we must regenerate words to keep the preview in sync
+        // otherwise the overlay will continue showing the old words
+        let newWords = segment.words
+        if (patch.text !== undefined && patch.text !== segment.text) {
+          const tokens = patch.text.split(/\s+/).map((t) => t.trim()).filter(Boolean)
+          if (tokens.length > 0) {
+            const duration = segment.end - segment.start
+            const perToken = duration / tokens.length
+            newWords = tokens.map((token, i) => ({
+              text: token,
+              start: segment.start + perToken * i,
+              end: segment.start + perToken * (i + 1),
+            }))
+          } else {
+            newWords = []
+          }
+        }
+
+        return {
+          ...segment,
+          ...patch,
+          words: newWords,
+        }
+      })
+      persistSegmentsToBase(updated)
+      invalidateRender()
       return updated
     })
   }
@@ -290,18 +390,8 @@ export function PostUploadWorkspace({ uploadId }: PostUploadWorkspaceProps) {
         const end = Math.max(value, segment.start + 0.1)
         return { ...segment, end }
       })
-      // Update baseSegmentsRef as above
-      const selectedTemplateObj = defaultTemplates.find((t) => t.id === selectedTemplate)
-      const isKinetic = selectedTemplateObj?.id === "creator-kinetic" || selectedTemplateObj?.renderTemplate === "karaoke"
-      if (!isKinetic) {
-        baseSegmentsRef.current = updated
-      } else {
-        const originals = baseSegmentsRef.current.map((orig) => {
-          const match = updated.find((seg) => String(seg.id).startsWith(String(orig.id)))
-          return match ? { ...orig, ...match } : orig
-        })
-        baseSegmentsRef.current = originals
-      }
+      persistSegmentsToBase(updated)
+      invalidateRender()
       return updated
     })
   }
@@ -319,22 +409,72 @@ export function PostUploadWorkspace({ uploadId }: PostUploadWorkspaceProps) {
     // Always add to baseSegmentsRef
     baseSegmentsRef.current = [...baseSegmentsRef.current, newSegment]
     // Reshape from baseSegmentsRef for current template
-    const selectedTemplateObj = defaultTemplates.find((t) => t.id === selectedTemplate)
-    setCaptionSegments(reshapeSegmentsForTemplate(baseSegmentsRef.current, selectedTemplateObj?.renderTemplate, selectedTemplateObj?.id))
+    const templateForShape = selectedTemplateOption ?? defaultTemplates[0]
+    setCaptionSegments(
+      reshapeSegmentsForTemplate(baseSegmentsRef.current, templateForShape.renderTemplate, templateForShape.id)
+    )
     setSelectedSegmentId(newSegment.id)
-    setCurrentTime(start)
+    seekToTime(start)
+    invalidateRender()
   }
 
   const handleDeleteSegment = (segmentId: string) => {
     // Remove from baseSegmentsRef
     baseSegmentsRef.current = baseSegmentsRef.current.filter((segment) => segment.id !== segmentId)
     // Reshape from baseSegmentsRef for current template
-    const selectedTemplateObj = defaultTemplates.find((t) => t.id === selectedTemplate)
-    setCaptionSegments(reshapeSegmentsForTemplate(baseSegmentsRef.current, selectedTemplateObj?.renderTemplate, selectedTemplateObj?.id))
+    const templateForShape = selectedTemplateOption ?? defaultTemplates[0]
+    setCaptionSegments(
+      reshapeSegmentsForTemplate(baseSegmentsRef.current, templateForShape.renderTemplate, templateForShape.id)
+    )
     if (selectedSegmentId === segmentId) {
       setSelectedSegmentId(null)
     }
+    invalidateRender()
   }
+
+  const handleCopyTranscript = useCallback(async () => {
+    const transcriptText = captionSegments.map((segment) => segment.text).join("\n").trim()
+
+    if (!transcriptText.length) {
+      setCopyFeedback("No transcript available to copy.")
+      return
+    }
+
+    try {
+      if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(transcriptText)
+      } else if (typeof document !== "undefined") {
+        const textarea = document.createElement("textarea")
+        textarea.value = transcriptText
+        textarea.setAttribute("readonly", "")
+        textarea.style.position = "absolute"
+        textarea.style.left = "-9999px"
+        document.body.appendChild(textarea)
+        textarea.select()
+        document.execCommand("copy")
+        document.body.removeChild(textarea)
+      }
+      setCopyFeedback("Transcript copied to clipboard.")
+    } catch (error) {
+      console.error("Copy transcript failed", error)
+      setCopyFeedback("Unable to copy transcript.")
+    }
+  }, [captionSegments])
+
+  const handleTogglePlayback = useCallback(() => {
+    const video = videoRef.current
+    if (!video) return
+    if (video.paused) {
+      void video.play()
+    } else {
+      video.pause()
+    }
+  }, [])
+
+  const handleScrub = useCallback((nextTime: number) => {
+    if (!Number.isFinite(nextTime)) return
+    seekToTime(nextTime)
+  }, [seekToTime])
 
   const handleSaveTranscript = async () => {
     if (!transcriptId) {
@@ -382,10 +522,11 @@ export function PostUploadWorkspace({ uploadId }: PostUploadWorkspaceProps) {
 
   const handleExportAction = () => {
     if (downloadUrl && jobStatus === "done") {
-      handleDownload()
+      void handleDownload()
       return
     }
     if (!selectedTemplateOption) return
+    setShowExportModal(true)
     void enqueueRenderJob(selectedTemplateOption)
   }
 
@@ -411,9 +552,14 @@ export function PostUploadWorkspace({ uploadId }: PostUploadWorkspaceProps) {
         const status = payload.job.status
 
         setJobStatus(status)
+        const progressValue = normalizeJobProgressValue(payload.job.result?.progress)
+        if (progressValue !== null) {
+          setJobProgress(progressValue)
+        }
 
         if (status === "done") {
           clearInterval(pollTimer)
+          setJobProgress(1)
 
           const direct = payload.job.result?.downloadUrl ?? null
           if (direct) {
@@ -434,6 +580,7 @@ export function PostUploadWorkspace({ uploadId }: PostUploadWorkspaceProps) {
           clearInterval(pollTimer)
           setJobMessage(payload.job.error ?? "Render failed.")
           setDownloadUrl(null)
+          setJobProgress(null)
         }
       } catch (err) {
         if (!stop) {
@@ -451,310 +598,452 @@ export function PostUploadWorkspace({ uploadId }: PostUploadWorkspaceProps) {
     }
   }, [jobId, fetchRenderDownload])
 
-  const handleDownload = () => {
-    if (downloadUrl) window.open(downloadUrl, "_blank", "noopener,noreferrer")
+  const handleDownload = useCallback(async () => {
+    if (!downloadUrl) return
+
+    try {
+      const response = await fetch(downloadUrl)
+      if (!response.ok) {
+        throw new Error("Download failed")
+      }
+
+      const blob = await response.blob()
+      const objectUrl = URL.createObjectURL(blob)
+      const anchor = document.createElement("a")
+      anchor.href = objectUrl
+      anchor.download = buildDownloadFilename(previewTitle, uploadId)
+      document.body.appendChild(anchor)
+      anchor.click()
+      document.body.removeChild(anchor)
+      URL.revokeObjectURL(objectUrl)
+    } catch (error) {
+      console.error("Inline download failed", error)
+      setJobMessage("Unable to download file inline. Please try again.")
+    }
+  }, [downloadUrl, previewTitle, uploadId])
+
+  const handleCloseExportModal = () => {
+    setShowExportModal(false)
   }
 
-  const statusIcon =
-    jobStatus === "done" ? (
-      <CheckCircle2 className="h-5 w-5 text-emerald-500" />
-    ) : jobStatus === "failed" ? (
-      <AlertTriangle className="h-5 w-5 text-amber-500" />
-    ) : jobId ? (
-      <Loader2 className="h-5 w-5 animate-spin text-primary" />
-    ) : downloadUrl ? (
-      <CheckCircle2 className="h-5 w-5 text-emerald-500" />
-    ) : (
-      <Layers className="h-5 w-5 text-muted-foreground" />
-    )
+  const exportStatusLabel = jobStatus
+    ? jobStatus.replace(/_/g, " ").replace(/^./, (char) => char.toUpperCase())
+    : jobId
+      ? "Preparing"
+      : "Idle"
 
-  const currentStatus = jobId
-    ? jobStatus ?? "queued"
-    : downloadUrl
-      ? "Rendered video ready"
-      : "Waiting for you to render"
+  const computedProgress = typeof jobProgress === "number"
+    ? Math.round(Math.min(1, Math.max(0, jobProgress)) * 100)
+    : null
 
-  const renderQuickStats = (
-    <div className="rounded-3xl border border-dashed border-border/70 bg-card/60 p-6">
-      <div className="flex items-center gap-3">
-        <div className="rounded-full bg-primary/10 p-3">
-          <Layers className="h-5 w-5 text-primary" />
-        </div>
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-wide text-primary">Render status</p>
-          <h2 className="text-xl font-semibold">Process & download</h2>
-        </div>
-      </div>
+  const renderProgress = computedProgress ?? (jobStatus === "done"
+    ? 100
+    : jobStatus === "failed"
+      ? 100
+      : jobStatus === "processing"
+        ? 70
+        : jobStatus === "queued"
+          ? 45
+          : jobId
+            ? 20
+            : 0)
 
-      <div className="mt-4 flex items-center gap-3 text-lg font-semibold">
-        {statusIcon}
-        <span className="capitalize">{currentStatus}</span>
-      </div>
-      {jobMessage && <p className="mt-2 text-sm text-muted-foreground">{jobMessage}</p>}
-
-      {!jobId && !downloadUrl && (
-        <p className="mt-2 text-sm text-muted-foreground">
-          When the preview looks perfect, press “Export & Download” to burn captions via FFmpeg.
-        </p>
-      )}
-
-      {downloadUrl && jobStatus === "done" && (
-        <Button onClick={handleDownload} className="mt-4 gap-2">
-          <Download className="h-4 w-4" />
-          Download latest render
-        </Button>
-      )}
-
-      {jobStatus === "failed" && (
-        <Button
-          variant="outline"
-          className="mt-4"
-          onClick={() => enqueueRenderJob(selectedTemplateOption)}
-          disabled={isDispatchingRender}
-        >
-          Retry render
-        </Button>
-      )}
-    </div>
-  )
+  const estimatedEta = jobStatus === "done"
+    ? "Render complete. You can download the file now."
+    : jobStatus === "failed"
+      ? "Render failed. Adjust settings and try again."
+      : computedProgress !== null
+        ? `Rendering... ${computedProgress}% complete.`
+        : "Estimated time: ~2–3 minutes depending on video length."
 
   return (
-    <div className="space-y-8">
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-wide text-primary">Workspace</p>
-          <h1 className="text-3xl font-bold">{preview?.upload.title ?? "Preparing video..."}</h1>
-          <p className="text-sm text-muted-foreground">
-            {captionSegments.length} caption segments · Language {preview?.upload.language ?? "—"}
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-3">
-          <Button
-            variant="outline"
-            onClick={handleSaveTranscript}
-            disabled={isSavingTranscript || !transcriptId}
-          >
-            {isSavingTranscript ? "Saving..." : transcriptId ? "Save transcript" : "Transcript pending"}
-          </Button>
-          <Button
-            className="gap-2"
-            onClick={handleExportAction}
-            disabled={isDispatchingRender}
-          >
-            <Download className="h-4 w-4" />
-            {exportButtonLabel}
-          </Button>
-        </div>
-      </div>
-
-      {previewError && (
-        <div className="rounded-2xl border border-rose-500/40 bg-rose-500/5 px-4 py-3 text-sm text-rose-500">
-          {previewError}
-        </div>
-      )}
-
-      {saveFeedback && (
-        <div
-          className={cn(
-            "rounded-2xl border px-4 py-3 text-sm",
-            saveFeedback.variant === "success"
-              ? "border-emerald-500/40 bg-emerald-500/5 text-emerald-500"
-              : "border-rose-500/40 bg-rose-500/5 text-rose-500",
-          )}
-        >
-          {saveFeedback.message}
-        </div>
-      )}
-
-      <div className="grid gap-6 xl:grid-cols-[minmax(0,1.3fr)_minmax(360px,0.8fr)]">
-        <div className="space-y-6">
-          <div className="rounded-3xl border border-border/60 bg-card/80 p-6 shadow-xl">
-            <div className="flex flex-wrap items-center justify-between gap-4">
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-wide text-primary">Realtime preview</p>
-                <h2 className="text-xl font-semibold">{selectedTemplateOption.name}</h2>
-                <p className="text-sm text-muted-foreground">Choose a platform style below.</p>
-              </div>
-            </div>
-            {templateStatus && <p className="mt-3 text-sm text-muted-foreground">{templateStatus}</p>}
-
-            <div className="mt-6 rounded-[32px] border border-border/60 bg-background/40 p-4">
-              {preview?.video.url ? (
-                <div className="relative aspect-[9/16] max-w-xs md:max-w-sm mx-auto rounded-[28px] border border-border bg-black shadow-2xl overflow-hidden">
-                  <video
-                    src={preview.video.url}
-                    controls
-                    className="w-full h-full object-contain"
-                    onTimeUpdate={e => setCurrentTime(e.currentTarget.currentTime)}
-                    onLoadedMetadata={e => setCurrentTime(0)}
-                  />
-                  {/* Caption overlay for Creator Kinetics */}
-                  {selectedTemplate === "creator-kinetic" && (
-                    <KineticCaptionOverlay
-                      segments={captionsForPlayer}
-                      currentTime={currentTime}
-                    />
-                  )}
-                  {/* Caption overlay for Documentary (simple) */}
-                  {selectedTemplate === "documentary" && (
-                    <SimpleCaptionOverlay
-                      segments={captionsForPlayer}
-                      currentTime={currentTime}
-                    />
-                  )}
-                </div>
-              ) : (
-                <div className="aspect-[9/16] max-w-sm mx-auto rounded-[28px] border border-dashed border-border/70 bg-muted/40" />
-              )}
-            </div>
-
-
-
-            <div className="mt-6 space-y-3">
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-wide text-primary">Templates</p>
-                <h3 className="text-lg font-semibold">Pick a look</h3>
-                <p className="text-sm text-muted-foreground">Tap a card to update the preview instantly.</p>
-              </div>
-              <TemplateSelector
-                templates={defaultTemplates}
-                selectedTemplateId={selectedTemplate}
-                onSelect={handleTemplateSelect}
-                isProcessing={isApplyingTemplate || isPreviewLoading}
-              />
-            </div>
+    <>
+      <div className="space-y-8">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-wide text-primary">Workspace</p>
+            <h1 className="text-3xl font-bold">{preview?.upload.title ?? "Preparing video..."}</h1>
+            <p className="text-sm text-muted-foreground">
+              {captionSegments.length} caption segments · Language {preview?.upload.language ?? "—"}
+            </p>
           </div>
-
-          {renderQuickStats}
-        </div>
-
-        <div className="rounded-3xl border border-border/70 bg-card/80 p-6 shadow-lg flex h-full flex-col">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-xs font-semibold uppercase tracking-wide text-primary">Timeline</p>
-              <h2 className="text-xl font-semibold">Word editor</h2>
-              <p className="text-sm text-muted-foreground">Edit per-line captions and timings.</p>
-            </div>
-            <Button size="icon" variant="outline" className="rounded-full" onClick={handleAddSegment}>
-              <Plus className="h-4 w-4" />
+          <div className="flex flex-wrap items-center gap-3">
+            <Button
+              variant="outline"
+              onClick={handleSaveTranscript}
+              disabled={isSavingTranscript || !transcriptId}
+            >
+              {isSavingTranscript ? "Saving..." : transcriptId ? "Save transcript" : "Transcript pending"}
+            </Button>
+            <Button
+              className="gap-2"
+              onClick={handleExportAction}
+              disabled={isDispatchingRender}
+            >
+              <Download className="h-4 w-4" />
+              {exportButtonLabel}
             </Button>
           </div>
+        </div>
 
-          <div className="mt-4 relative">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              value={searchQuery}
-              onChange={(event) => setSearchQuery(event.target.value)}
-              placeholder="Search words..."
-              className="pl-9"
-            />
+        {previewError && (
+          <div className="rounded-2xl border border-rose-500/40 bg-rose-500/5 px-4 py-3 text-sm text-rose-500">
+            {previewError}
           </div>
+        )}
 
-          <div className="mt-4 flex-1 overflow-y-auto space-y-3 pr-1">
-            {filteredSegments.length === 0 && (
-              <div className="rounded-2xl border border-dashed border-border/60 p-6 text-center text-sm text-muted-foreground">
-                No captions match that search.
-              </div>
+        {saveFeedback && (
+          <div
+            className={cn(
+              "rounded-2xl border px-4 py-3 text-sm",
+              saveFeedback.variant === "success"
+                ? "border-emerald-500/40 bg-emerald-500/5 text-emerald-500"
+                : "border-rose-500/40 bg-rose-500/5 text-rose-500",
             )}
+          >
+            {saveFeedback.message}
+          </div>
+        )}
 
-            {filteredSegments.map((segment) => {
-              const isActive = selectedSegmentId === segment.id
-              const isPlaying = currentTime >= segment.start && currentTime <= segment.end
-              return (
-                <div
-                  key={segment.id}
-                  className={cn(
-                    "rounded-2xl border p-4 transition",
-                    isActive ? "border-primary bg-primary/5" : "border-border bg-background/60",
-                  )}
-                  onClick={() => {
-                    setSelectedSegmentId(segment.id)
-                    setCurrentTime(segment.start)
-                  }}
-                >
-                  <div className="flex items-center justify-between text-xs text-muted-foreground">
-                    <span>
-                      {formatTimestamp(segment.start)} – {formatTimestamp(segment.end)}
-                    </span>
-                    <div className="flex items-center gap-1">
+        <div className="flex flex-col gap-8 xl:flex-row xl:items-start xl:justify-center">
+          <div className="w-full max-w-[520px] h-[720px]">
+            <div className="flex h-full flex-col rounded-3xl border border-border/70 bg-card/90 p-6 shadow-xl">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-primary">Realtime preview</p>
+                  <h2 className="text-xl font-semibold leading-tight">{selectedTemplateOption.name}</h2>
+                  <p className="text-xs text-muted-foreground">Video stays true to its native ratio.</p>
+                </div>
+                <span className="rounded-full border border-border/60 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                  {preview?.video.durationSeconds ? `${Math.round(preview.video.durationSeconds)}s` : "Live"}
+                </span>
+              </div>
+
+              <div className="mt-4 flex h-full flex-col gap-4">
+                <div className="flex min-h-[420px] flex-1 flex-col rounded-4xl border border-border/60 bg-linear-to-b from-background/80 via-background/40 to-background/20 p-4 shadow-inner">
+                  <div className="flex items-center justify-between text-[11px] font-semibold uppercase tracking-[0.2em] text-muted-foreground">
+                    <span>Preview surface</span>
+                    <span>{preview?.upload.title ?? "Loading"}</span>
+                  </div>
+                  <div className="mt-4 flex flex-1 items-center justify-center">
+                    {preview?.video.url ? (
+                      <div className="relative mx-auto inline-flex max-h-full max-w-full items-center justify-center">
+                        <video
+                          ref={videoRef}
+                          src={preview.video.url}
+                          controls={false}
+                          className="block max-h-[520px] max-w-full rounded-2xl object-contain shadow-2xl"
+                          style={{ aspectRatio: videoAspectRatio }}
+                          onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)}
+                          onLoadedMetadata={(event) => {
+                            setCurrentTime(0)
+                            setVideoResolution({ width: event.currentTarget.videoWidth, height: event.currentTarget.videoHeight })
+                            setVideoDuration(event.currentTarget.duration || preview?.video?.durationSeconds || 0)
+                          }}
+                          onClick={handleTogglePlayback}
+                          onPlay={() => setIsVideoPlaying(true)}
+                          onPause={() => setIsVideoPlaying(false)}
+                        />
+                        {selectedTemplate === "creator-kinetic" && (
+                          <CreatorKineticOverlay
+                            videoRef={videoRef}
+                            captions={captionsForPlayer}
+                            wordsOverride={overlayKineticWords}
+                            currentTime={currentTime}
+                            config={overlayConfig}
+                            onUpdateConfiguration={handleOverlayConfigChange}
+                          />
+                        )}
+                        {selectedTemplate === "documentary" && (
+                          <SimpleCaptionOverlay segments={captionsForPlayer} currentTime={currentTime} />
+                        )}
+                      </div>
+                    ) : (
+                      <div className="flex h-full w-full items-center justify-center rounded-3xl border border-dashed border-border/70 bg-background/40 text-sm text-muted-foreground">
+                        Preview will appear here once processing finishes.
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {preview?.video.url && (
+                  <div className="rounded-3xl border border-border/60 bg-background/70 p-4 shadow-sm">
+                    <div className="flex items-center justify-between text-xs font-mono text-muted-foreground">
+                      <span>{formattedCurrentTime}</span>
+                      <span>{formattedTotalDuration}</span>
+                    </div>
+                    <div className="mt-3 flex items-center gap-3">
                       <Button
                         size="icon"
-                        variant="ghost"
-                        className="h-8 w-8"
-                        onClick={(event) => {
-                          event.stopPropagation()
-                          setCurrentTime(segment.start)
-                        }}
+                        variant="outline"
+                        className="rounded-full"
+                        onClick={handleTogglePlayback}
                       >
-                        <Play className="h-3.5 w-3.5" />
+                        {isVideoPlaying ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
                       </Button>
-                      <Button
-                        size="icon"
-                        variant="ghost"
-                        className="h-8 w-8 text-rose-500"
-                        onClick={(event) => {
-                          event.stopPropagation()
-                          handleDeleteSegment(segment.id)
-                        }}
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </Button>
+                      <div className="relative flex-1 py-2">
+                        <div className="absolute inset-x-0 top-1/2 h-1 -translate-y-1/2 rounded-full bg-muted-foreground/20" />
+                        <div
+                          className="absolute top-1/2 h-1 -translate-y-1/2 rounded-full bg-primary transition-all"
+                          style={{ width: `${playbackProgress * 100}%` }}
+                        />
+                        <span
+                          className="absolute top-1/2 h-3 w-3 -translate-y-1/2 rounded-full border-2 border-background bg-primary shadow"
+                          style={{ left: `calc(${playbackProgress * 100}% - 6px)` }}
+                        />
+                        <input
+                          type="range"
+                          min={0}
+                          max={Math.max(sliderMax, 0.1)}
+                          step={0.01}
+                          value={Math.min(currentTime, sliderMax)}
+                          onChange={(event) => handleScrub(Number(event.target.value))}
+                          className="relative z-10 h-4 w-full cursor-pointer appearance-none bg-transparent"
+                          aria-label="Video timeline"
+                        />
+                      </div>
                     </div>
                   </div>
-
-                  <textarea
-                    className="mt-2 w-full resize-none rounded-xl border border-border bg-background/70 p-3 text-sm focus:border-primary focus:outline-none"
-                    rows={2}
-                    value={segment.text}
-                    onChange={(event) => handleSegmentChange(segment.id, { text: event.target.value })}
-                  />
-
-                  <div className="mt-3 grid grid-cols-2 gap-3 text-xs">
-                    <label className="space-y-1 text-muted-foreground">
-                      <span className="block uppercase tracking-wide">Start</span>
-                      <Input
-                        type="number"
-                        value={segment.start.toFixed(2)}
-                        step={0.1}
-                        min={0}
-                        onChange={(event) => {
-                          const nextValue = Number(event.target.value)
-                          if (Number.isNaN(nextValue)) return
-                          handleSegmentTimingChange(segment.id, "start", nextValue)
-                        }}
-                        className="text-sm"
-                      />
-                    </label>
-                    <label className="space-y-1 text-muted-foreground">
-                      <span className="block uppercase tracking-wide">End</span>
-                      <Input
-                        type="number"
-                        value={segment.end.toFixed(2)}
-                        step={0.1}
-                        min={segment.start + 0.1}
-                        onChange={(event) => {
-                          const nextValue = Number(event.target.value)
-                          if (Number.isNaN(nextValue)) return
-                          handleSegmentTimingChange(segment.id, "end", nextValue)
-                        }}
-                        className="text-sm"
-                      />
-                    </label>
-                  </div>
-
-                  {isPlaying && <p className="mt-2 text-xs font-semibold text-primary">Live now</p>}
-                </div>
-              )
-            })}
+                )}
+              </div>
+            </div>
           </div>
 
-          <Button variant="outline" className="mt-4 gap-2" onClick={handleAddSegment}>
-            <Plus className="h-4 w-4" />
-            Add caption
-          </Button>
+          <div className="w-full max-w-[520px] h-[720px]">
+            <div className="flex h-full flex-col rounded-3xl border border-border/70 bg-card/90 p-6 shadow-xl overflow-hidden">
+              <Tabs defaultValue="captions" className="flex h-full flex-col">
+                <div className="flex flex-col gap-2 flex-none">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-wide text-primary">Timeline</p>
+                      <h2 className="text-xl font-semibold">Word editor</h2>
+                      <p className="text-sm text-muted-foreground">Edit per-line captions and timings.</p>
+                    </div>
+                    <Button size="icon" variant="outline" className="rounded-full" onClick={handleCopyTranscript}>
+                      <Copy className="h-4 w-4" />
+                    </Button>
+                  </div>
+                  {copyFeedback && <p className="text-xs font-medium text-emerald-500">{copyFeedback}</p>}
+                  <TabsList className="flex w-full gap-1 rounded-2xl bg-muted/40 p-1">
+                    <TabsTrigger
+                      value="captions"
+                      className="flex-1 rounded-2xl text-xs font-semibold uppercase tracking-wide"
+                    >
+                      Word editor
+                    </TabsTrigger>
+                    <TabsTrigger
+                      value="templates"
+                      className="flex-1 rounded-2xl text-xs font-semibold uppercase tracking-wide"
+                    >
+                      Templates
+                    </TabsTrigger>
+                  </TabsList>
+                </div>
+
+                <div className="mt-4 flex-1 overflow-hidden">
+                  <TabsContent value="captions" className="flex h-full flex-col overflow-hidden">
+                    <div className="relative">
+                      <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                      <Input
+                        value={searchQuery}
+                        onChange={(event) => setSearchQuery(event.target.value)}
+                        placeholder="Search words..."
+                        className="pl-9"
+                      />
+                    </div>
+
+                    <div className="mt-4 flex-1 overflow-hidden">
+                      <div className="h-full overflow-y-auto rounded-2xl border border-border/70 bg-background/70 p-4">
+                        {filteredSegments.length === 0 && (
+                          <div className="rounded-2xl border border-dashed border-border/60 p-6 text-center text-sm text-muted-foreground">
+                            No captions match that search.
+                          </div>
+                        )}
+
+                        <div className="space-y-3 pr-1">
+                          {filteredSegments.map((segment) => {
+                            const isActive = selectedSegmentId === segment.id
+                            return (
+                              <div
+                                key={segment.id}
+                                className={cn(
+                                  "rounded-2xl border p-3 transition",
+                                  isActive ? "border-primary bg-primary/5" : "border-border bg-background/60",
+                                )}
+                                onClick={() => {
+                                  setSelectedSegmentId(segment.id)
+                                  seekToTime(segment.start)
+                                }}
+                              >
+                                <div className="flex items-center justify-between text-xs text-muted-foreground">
+                                  <span>
+                                    {formatTimestamp(segment.start)} – {formatTimestamp(segment.end)}
+                                  </span>
+                                  <div className="flex items-center gap-1">
+                                    <Button
+                                      size="icon"
+                                      variant="ghost"
+                                      className="h-8 w-8"
+                                      onClick={(event) => {
+                                        event.stopPropagation()
+                                        seekToTime(segment.start)
+                                      }}
+                                    >
+                                      <Play className="h-3.5 w-3.5" />
+                                    </Button>
+                                    <Button
+                                      size="icon"
+                                      variant="ghost"
+                                      className="h-8 w-8 text-rose-500"
+                                      onClick={(event) => {
+                                        event.stopPropagation()
+                                        handleDeleteSegment(segment.id)
+                                      }}
+                                    >
+                                      <Trash2 className="h-3.5 w-3.5" />
+                                    </Button>
+                                  </div>
+                                </div>
+
+                                <textarea
+                                  className="mt-2 w-full resize-none rounded-xl border border-border bg-background/70 p-2.5 text-sm focus:border-primary focus:outline-none"
+                                  rows={2}
+                                  value={segment.text}
+                                  onChange={(event) => handleSegmentChange(segment.id, { text: event.target.value })}
+                                />
+
+                                <div className="mt-3 grid grid-cols-2 gap-3 text-xs">
+                                  <label className="space-y-1 text-muted-foreground">
+                                    <span className="block uppercase tracking-wide">Start</span>
+                                    <Input
+                                      type="number"
+                                      value={segment.start.toFixed(2)}
+                                      step={0.1}
+                                      min={0}
+                                      onChange={(event) => {
+                                        const nextValue = Number(event.target.value)
+                                        if (Number.isNaN(nextValue)) return
+                                        handleSegmentTimingChange(segment.id, "start", nextValue)
+                                      }}
+                                      className="text-sm"
+                                    />
+                                  </label>
+                                  <label className="space-y-1 text-muted-foreground">
+                                    <span className="block uppercase tracking-wide">End</span>
+                                    <Input
+                                      type="number"
+                                      value={segment.end.toFixed(2)}
+                                      step={0.1}
+                                      min={segment.start + 0.1}
+                                      onChange={(event) => {
+                                        const nextValue = Number(event.target.value)
+                                        if (Number.isNaN(nextValue)) return
+                                        handleSegmentTimingChange(segment.id, "end", nextValue)
+                                      }}
+                                      className="text-sm"
+                                    />
+                                  </label>
+                                </div>
+
+                                {isActive && <p className="mt-2 text-xs font-semibold text-primary">Live now</p>}
+                              </div>
+                            )
+                          })}
+                        </div>
+                      </div>
+                    </div>
+
+                    <Button
+                      variant="outline"
+                      className="mt-4 flex w-full items-center justify-center gap-2 rounded-2xl border-dashed border-border/70"
+                      onClick={handleAddSegment}
+                    >
+                      <Plus className="h-4 w-4" />
+                      Add caption
+                    </Button>
+                  </TabsContent>
+
+                  <TabsContent value="templates" className="h-full overflow-hidden">
+                    <div className="flex h-full flex-col rounded-2xl border border-border/70 bg-background/70 p-4">
+                      <div>
+                        <p className="text-xs font-semibold uppercase tracking-wide text-primary">Template switcher</p>
+                        <p className="text-sm text-muted-foreground">Swap looks while staying in the timeline.</p>
+                      </div>
+                      <div className="mt-4 flex-1 overflow-y-auto pr-1">
+                        <TemplateSelector
+                          templates={defaultTemplates}
+                          selectedTemplateId={selectedTemplate}
+                          onSelect={handleTemplateSelect}
+                          isProcessing={isApplyingTemplate || isPreviewLoading}
+                        />
+                      </div>
+                      <p className="mt-4 text-xs text-muted-foreground">Changes apply instantly to the live preview.</p>
+                    </div>
+                  </TabsContent>
+                </div>
+              </Tabs>
+            </div>
+          </div>
         </div>
+
+        {showExportModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-6">
+            <div className="relative w-full max-w-lg rounded-3xl border border-border bg-card p-6 shadow-2xl">
+              <button
+                type="button"
+                onClick={handleCloseExportModal}
+                className="absolute right-5 top-5 text-sm text-muted-foreground transition hover:text-foreground"
+              >
+                Close
+              </button>
+              <div className="flex flex-col gap-2 pr-10">
+                <p className="text-xs font-semibold uppercase tracking-wide text-primary">Export status</p>
+                <h3 className="text-2xl font-semibold leading-tight">
+                  {jobStatus === "done" ? "Render ready" : jobStatus === "failed" ? "Render failed" : "Rendering your video"}
+                </h3>
+                <p className="text-sm text-muted-foreground">{estimatedEta}</p>
+              </div>
+
+              <div className="mt-6 space-y-1 text-sm">
+                <span className="text-xs uppercase tracking-wide text-muted-foreground">File</span>
+                <p className="truncate font-medium">
+                  {preview?.upload.title ?? `Upload ${uploadId}`}
+                </p>
+              </div>
+
+              <div className="mt-4 space-y-1 text-sm">
+                <span className="text-xs uppercase tracking-wide text-muted-foreground">Status</span>
+                <p className="font-medium">{exportStatusLabel}</p>
+                {jobMessage && <p className="text-xs text-muted-foreground">{jobMessage}</p>}
+              </div>
+
+              <div className="mt-6">
+                <div className="flex items-center justify-between text-xs uppercase tracking-wide text-muted-foreground">
+                  <span>Progress</span>
+                  <span>{renderProgress}%</span>
+                </div>
+                <div className="mt-2 h-2 w-full rounded-full bg-border/70">
+                  <div
+                    className="h-full rounded-full bg-primary transition-all"
+                    style={{ width: `${renderProgress}%` }}
+                  />
+                </div>
+              </div>
+
+              {downloadUrl && jobStatus === "done" ? (
+                <Button className="mt-6 w-full" onClick={() => void handleDownload()}>
+                  Download render
+                </Button>
+              ) : (
+                <div className="mt-6 text-xs text-muted-foreground">
+                  We’ll notify you once the download link is ready.
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </div>
-    </div>
+    </>
   )
 }
 
@@ -861,6 +1150,79 @@ function reshapeSegmentsForTemplate(
   return reshaped
 }
 
+function mergeChunkedSegments(segments: CaptionSegment[]): CaptionSegment[] {
+  const grouped = new Map<string, CaptionSegment[]>()
+
+  segments.forEach((segment) => {
+    const id = String(segment.id)
+    const baseId = id.includes("_ck_") ? id.split("_ck_")[0] : id
+    const collection = grouped.get(baseId) ?? []
+    collection.push(segment)
+    grouped.set(baseId, collection)
+  })
+
+  return Array.from(grouped.entries()).map(([baseId, group]) => {
+    if (group.length === 1 && String(group[0].id) === baseId) {
+      return cloneSegment(group[0])
+    }
+
+    const sorted = [...group].sort((a, b) => a.start - b.start)
+    const mergedWords = sorted.flatMap((segment) => segment.words ?? []).map(cloneWord)
+    const mergedText = mergedWords.length
+      ? mergedWords.map((word) => word.text).join(" ")
+      : sorted.map((segment) => segment.text).join(" ")
+
+    const templateSegment = cloneSegment(sorted[0])
+    const merged: CaptionSegment = {
+      ...templateSegment,
+      id: baseId,
+      start: sorted[0].start,
+      end: sorted[sorted.length - 1].end,
+      text: mergedText,
+    }
+
+    if (mergedWords.length) {
+      merged.words = mergedWords
+    } else {
+      delete merged.words
+    }
+
+    return merged
+  })
+}
+
+function normalizeJobProgressValue(value?: unknown): number | null {
+  const numeric =
+    typeof value === "number"
+      ? value
+      : typeof value === "string"
+        ? Number(value)
+        : Number.NaN
+
+  if (!Number.isFinite(numeric)) {
+    return null
+  }
+
+  if (numeric > 1) {
+    return Math.min(1, Math.max(0, numeric / 100))
+  }
+
+  return Math.min(1, Math.max(0, numeric))
+}
+
+function buildDownloadFilename(title?: string | null, uploadId?: string | null): string {
+  const fallback = uploadId ? `render-${uploadId.slice(0, 8)}` : "rendered-video"
+  const base = title && title.trim().length ? title.trim() : fallback
+  const safe = base
+    .toLowerCase()
+    .replace(/[^a-z0-9-_]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 60)
+
+  return `${safe || fallback}.mp4`
+}
+
 function ensureSegmentWords(segment: CaptionSegment): CaptionWord[] {
   if (segment.words?.length) {
     return segment.words.map(cloneWord)
@@ -908,4 +1270,12 @@ function formatTimestamp(value: number) {
   const mins = Math.floor(value / 60)
   const secs = Math.floor(value % 60)
   return `${mins}:${secs.toString().padStart(2, "0")}`
+}
+
+function createDefaultOverlayConfig(): OverlayConfig {
+  return {
+    scale: 3.35,
+    x: 50,
+    y: 50,
+  }
 }
