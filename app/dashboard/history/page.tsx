@@ -2,18 +2,19 @@ import { createClient } from "@/lib/supabase/server"
 import { redirect } from "next/navigation"
 import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
-import { Download, Edit3, Trash2 } from "lucide-react"
+import { Input } from "@/components/ui/input"
+import { Edit3, Trash2, Search } from "lucide-react"
 import Link from "next/link"
-import { FileText } from "lucide-react" // Added import for FileText
+import { FileText } from "lucide-react"
 
-interface Video {
+interface UploadHistoryEntry {
   id: string
-  title: string
-  duration: number
-  status: string
+  file_name: string | null
+  duration_seconds: number | null
+  status: string | null
   created_at: string
-  file_size: number
-  transcript?: string
+  updated_at: string | null
+  file_size: number | null
 }
 
 export default async function HistoryPage() {
@@ -28,23 +29,32 @@ export default async function HistoryPage() {
   }
 
   const { data, error: fetchError } = await supabase
-    .from("videos")
-    .select("*")
+    .from("uploads")
+    .select("id,file_name,file_size,duration_seconds,status,created_at,updated_at")
     .eq("user_id", user.id)
-    .order("created_at", { ascending: false })
+    .order("updated_at", { ascending: false })
 
   if (fetchError) {
-    console.error("Error fetching videos:", fetchError)
+    console.error("Error fetching videos:", fetchError.message ?? fetchError)
   }
 
-  const videos: Video[] = (data ?? []) as Video[]
+  const uploads: UploadHistoryEntry[] = (data ?? []) as UploadHistoryEntry[]
 
-  const formatFileSize = (bytes: number) => {
+  const formatFileSize = (bytes: number | null) => {
+    if (!bytes || Number.isNaN(bytes)) return "—"
     const mb = bytes / (1024 * 1024)
-    return mb.toFixed(1)
+    return `${mb.toFixed(1)}MB`
+  }
+
+  const formatDuration = (seconds: number | null) => {
+    if (!seconds || Number.isNaN(seconds)) return "—"
+    const minutes = Math.floor(seconds / 60)
+    const remainingSeconds = Math.round(seconds % 60)
+    return minutes ? `${minutes}m ${remainingSeconds}s` : `${remainingSeconds}s`
   }
 
   const formatDate = (dateString: string) => {
+    if (!dateString) return "—"
     return new Date(dateString).toLocaleDateString("en-US", {
       year: "numeric",
       month: "short",
@@ -54,12 +64,14 @@ export default async function HistoryPage() {
     })
   }
 
-  const getStatusColor = (status: string) => {
+  const getStatusColor = (status: string | null) => {
     switch (status) {
       case "completed":
         return "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400"
       case "processing":
         return "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400"
+      case "transcribed":
+        return "bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-400"
       case "failed":
         return "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400"
       default:
@@ -69,12 +81,18 @@ export default async function HistoryPage() {
 
   return (
     <div className="p-8 max-w-7xl mx-auto">
-      <div className="mb-8">
-        <h1 className="text-3xl font-bold mb-2">Video History</h1>
-        <p className="text-muted-foreground">All your uploaded and processed videos</p>
+      <div className="mb-8 space-y-4">
+        <div>
+          <h1 className="text-3xl font-bold mb-2">Video History</h1>
+          <p className="text-muted-foreground">All your uploaded and processed videos</p>
+        </div>
+        <div className="relative max-w-md">
+          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+          <Input placeholder="Search videos..." className="pl-10" aria-label="Search uploaded videos" />
+        </div>
       </div>
 
-      {videos.length === 0 ? (
+      {uploads.length === 0 ? (
         <Card>
           <CardContent className="py-12">
             <div className="text-center">
@@ -88,39 +106,35 @@ export default async function HistoryPage() {
         </Card>
       ) : (
         <div className="grid gap-4">
-          {videos.map((video: Video) => (
-            <Card key={video.id} className="hover:border-primary/50 transition-colors">
+          {uploads.map((upload) => (
+            <Card key={upload.id} className="hover:border-primary/50 transition-colors">
               <CardContent className="py-6 px-6">
                 <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
                   <div className="flex-1 min-w-0">
-                    <h3 className="font-semibold text-lg mb-1 truncate">{video.title}</h3>
+                    <h3 className="font-semibold text-lg mb-1 truncate">{upload.file_name ?? "Untitled upload"}</h3>
                     <div className="flex flex-wrap gap-3 text-sm text-muted-foreground">
-                      <span>{formatDate(video.created_at)}</span>
+                      <span>{formatDate(upload.updated_at ?? upload.created_at)}</span>
                       <span className="hidden md:inline">•</span>
-                      <span>{Math.round(video.duration / 60)}m</span>
+                      <span>{formatDuration(upload.duration_seconds)}</span>
                       <span className="hidden md:inline">•</span>
-                      <span>{formatFileSize(video.file_size)}MB</span>
+                      <span>{formatFileSize(upload.file_size)}</span>
                     </div>
                   </div>
 
                   <div className="flex items-center gap-4">
                     <span
-                      className={`px-3 py-1 rounded-full text-xs font-medium whitespace-nowrap ${getStatusColor(video.status)}`}
+                      className={`px-3 py-1 rounded-full text-xs font-medium whitespace-nowrap ${getStatusColor(upload.status)}`}
                     >
-                      {video.status.charAt(0).toUpperCase() + video.status.slice(1)}
+                      {(upload.status ?? "pending").replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase())}
                     </span>
 
                     <div className="flex gap-2">
-                      <Link href={`/dashboard/editor/${video.id}`}>
+                      <Link href={`/dashboard/workspace/${upload.id}`}>
                         <Button size="sm" variant="outline" className="gap-2 bg-transparent">
                           <Edit3 className="w-4 h-4" />
                           <span className="hidden md:inline">Edit</span>
                         </Button>
                       </Link>
-                      <Button size="sm" variant="outline" className="gap-2 bg-transparent">
-                        <Download className="w-4 h-4" />
-                        <span className="hidden md:inline">Download</span>
-                      </Button>
                       <Button
                         size="sm"
                         variant="outline"

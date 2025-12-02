@@ -50,7 +50,7 @@ export default function LandingPage() {
         {/* Hero Image */}
         <div className="bg-card border border-border rounded-xl p-8 min-h-96 flex items-center justify-center overflow-hidden">
           <Image
-            src="/video-editing-interface-with-captions.jpg"
+            src="/image.png"
             alt="AutoCaps video editor interface"
             width={1280}
             height={720}

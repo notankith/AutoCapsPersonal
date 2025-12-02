@@ -1,5 +1,7 @@
 import { CaptionTemplate, TemplateOption } from "./types"
 
+export const CREATOR_KINETIC_TEMPLATE_ID = "creator-kinetic"
+
 export const Templates: Record<string, CaptionTemplate> = {
   minimal: {
     name: "Minimal",
@@ -32,9 +34,8 @@ export const Templates: Record<string, CaptionTemplate> = {
     fontSize: 58,
     primaryColor: "#FFFFFF",
     outlineColor: "#000000",
-    // Thin stroke: reduce from 6 to 1 to make the black outline much thinner
-    outlineWidth: 2,
-    // Removed drop shadow to eliminate the shadow behind text for Creator Kinetic
+    // Thin stroke so FFmpeg export stays crisp
+    outlineWidth: 1,
     shadowColor: "#000000",
     shadowWidth: 0,
     // Remove the default yellow highlight for creator-kinetic and instead use a cycling
@@ -69,7 +70,7 @@ export const Templates: Record<string, CaptionTemplate> = {
 
 export const defaultTemplates: TemplateOption[] = [
   {
-    id: "creator-kinetic",
+    id: CREATOR_KINETIC_TEMPLATE_ID,
     name: "Creator Kinetic",
     description:
       "RetroDream serif TikTok-style: zoom-in sentences, per-word neon glow, and kinetic timing.",
@@ -78,6 +79,7 @@ export const defaultTemplates: TemplateOption[] = [
       "linear-gradient(135deg, #0f172a 0%, #111111 40%, #39ff14 100%)",
     badge: "Sports",
     renderTemplate: "karaoke",
+    previewImage: "/image.png",
   },
   {
     id: "documentary",
@@ -86,9 +88,14 @@ export const defaultTemplates: TemplateOption[] = [
     accent: "#0ea5e9",
     background: "linear-gradient(135deg, #38bdf8 0%, #1d4ed8 100%)",
     renderTemplate: "minimal",
+    previewImage: "/download.jpg",
   },
 ]
 
 export function findTemplateById(id?: string | null) {
-  return defaultTemplates.find((template) => template.id === id) ?? defaultTemplates[0]
+  return (
+    defaultTemplates.find((template) => template.id === id) ||
+    defaultTemplates.find((template) => template.id === CREATOR_KINETIC_TEMPLATE_ID) ||
+    defaultTemplates[0]
+  )
 }

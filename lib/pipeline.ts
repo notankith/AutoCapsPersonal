@@ -24,6 +24,8 @@ export type CaptionWord = {
   start: number
   end: number
   text: string
+  confidence?: number
+  speaker?: string
 }
 
 export type CaptionSegment = {
@@ -51,6 +53,8 @@ const captionWordSchema = z.object({
   start: z.number(),
   end: z.number(),
   text: z.string(),
+  confidence: z.number().optional(),
+  speaker: z.string().optional(),
 })
 
 const captionSegmentPayloadSchema = z.object({
@@ -73,6 +77,13 @@ export const captionRequestSchema = z.object({
   transcriptId: z.string().uuid().optional(),
   translationId: z.string().uuid().optional(),
   segments: z.array(captionSegmentPayloadSchema).optional(),
+  customStyles: z.object({
+    fontSize: z.number().optional(),
+    marginV: z.number().optional(),
+    alignment: z.number().optional(),
+    playResX: z.number().optional(),
+    playResY: z.number().optional(),
+  }).optional(),
 })
 
 export function assertEnv(name: string, value: string | undefined) {

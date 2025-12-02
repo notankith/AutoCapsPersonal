@@ -5,7 +5,7 @@ import { type CaptionSegment } from "@/lib/pipeline"
 import { type CaptionTemplate } from "@/components/templates/types"
 
 interface CanvasCaptionRendererProps {
-  videoRef: React.RefObject<HTMLVideoElement>
+  videoRef: React.RefObject<HTMLVideoElement | null>
   captions: CaptionSegment[]
   template: CaptionTemplate
   onCaptionPosition?: (pos: { y: number; height: number }) => void

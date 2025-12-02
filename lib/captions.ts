@@ -3,14 +3,17 @@ import { Templates } from "@/components/templates/data"
 import { generateASS, toAssColor } from "@/components/templates/utils"
 import { CaptionTemplate } from "@/components/templates/types"
 
-const ASS_HEADER = `[Script Info]
+function getAssHeader(playResX = 1920, playResY = 1080) {
+  return `[Script Info]
 ScriptType: v4.00+
-PlayResX: 1920
-PlayResY: 1080
+PlayResX: ${playResX}
+PlayResY: ${playResY}
 ScaledBorderAndShadow: yes
+WrapStyle: 2
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding`
+}
 
 const ASS_EVENTS_HEADER = `
 
@@ -27,7 +30,11 @@ export type CaptionFile = {
   content: string
 }
 
-export function buildCaptionFile(templateId: CaptionTemplateId, segments: CaptionSegment[]): CaptionFile {
+export function buildCaptionFile(
+  templateId: CaptionTemplateId, 
+  segments: CaptionSegment[],
+  customStyles?: { fontSize?: number; marginV?: number; alignment?: number; playResX?: number; playResY?: number }
+): CaptionFile {
   let normalized = ensureWordTimings(segments)
   // Optionally clamp segment end times if a duration is provided
   if (typeof segments !== "undefined" && segments.length > 0) {
@@ -40,19 +47,22 @@ export function buildCaptionFile(templateId: CaptionTemplateId, segments: Captio
       }))
     }
   }
-  const template = Templates[templateId]
+  const baseTemplate = Templates[templateId]
 
-  if (!template) {
+  if (!baseTemplate) {
     // Fallback for unknown templates or if not in Templates map
     return { format: "srt", template: templateId, content: toSrt(normalized) }
   }
 
+  // Merge custom styles
+  const template = { ...baseTemplate, ...customStyles }
+
   // Generate ASS for all defined templates
-  const content = generateAssFile(template, normalized)
+  const content = generateAssFile(template, normalized, customStyles?.playResX, customStyles?.playResY)
   return { format: "ass", template: templateId, content }
 }
 
-function generateAssFile(template: CaptionTemplate, segments: CaptionSegment[]): string {
+function generateAssFile(template: CaptionTemplate, segments: CaptionSegment[], playResX?: number, playResY?: number): string {
   const styleLine = generateASS(template)
   
   let events = ""
@@ -62,7 +72,7 @@ function generateAssFile(template: CaptionTemplate, segments: CaptionSegment[]):
     events = generateSimpleEvents(template, segments)
   }
 
-  return `${ASS_HEADER}\n${styleLine}${ASS_EVENTS_HEADER}\n${events}`
+  return `${getAssHeader(playResX, playResY)}\n${styleLine}${ASS_EVENTS_HEADER}\n${events}`
 }
 
 function generateSimpleEvents(template: CaptionTemplate, segments: CaptionSegment[]): string {
@@ -82,7 +92,6 @@ function generateKaraokeEvents(template: CaptionTemplate, segments: CaptionSegme
   const cycleAfter = template.karaoke?.cycleAfterChunks ?? 2;
 
   const baseColorAss = toAssColor(template.primaryColor);
-  const outlineColorAss = toAssColor(template.outlineColor);
 
   let globalChunkIndex = 0;
 
@@ -92,88 +101,91 @@ function generateKaraokeEvents(template: CaptionTemplate, segments: CaptionSegme
 
       const words = segment.words as SegmentWord[];
 
-      // split: max 3 per line
-      const chunks: SegmentWord[][] = [];
-      let chunk: SegmentWord[] = [];
-      words.forEach((w, i) => {
-        chunk.push(w);
-        if (chunk.length === 3 || i === words.length - 1) {
-          chunks.push(chunk);
-          chunk = [];
+      // Break into lines first (keeps word groupings stable per line)
+      const lines: SegmentWord[][] = [];
+      let currentLine: SegmentWord[] = [];
+      words.forEach((word, idx) => {
+        currentLine.push(word);
+        const reachedLimit = currentLine.length >= CREATOR_KINETIC_MAX_WORDS_PER_LINE;
+        const atEnd = idx === words.length - 1;
+        if (reachedLimit || atEnd) {
+          lines.push(currentLine);
+          currentLine = [];
         }
       });
 
-      return chunks
-        .map((chunk, ci) => {
-          const chunkStart = chunk[0].start;
-          const chunkEnd = chunk[chunk.length - 1].end;
+      if (currentLine.length) {
+        lines.push(currentLine);
+      }
 
-          // Quick Zoom In (No Bounce): Start at 80% scale, zoom to 100% in 50ms
+      // Group lines into chunks of up to two lines so both render simultaneously
+      const chunkedLines: SegmentWord[][][] = [];
+      for (let i = 0; i < lines.length; i += CREATOR_KINETIC_MAX_LINES_PER_CHUNK) {
+        chunkedLines.push(lines.slice(i, i + CREATOR_KINETIC_MAX_LINES_PER_CHUNK));
+      }
+
+      return chunkedLines
+        .map((chunkLines) => {
+          const chunkStart = chunkLines[0][0].start;
+          const lastLine = chunkLines[chunkLines.length - 1];
+          const chunkEnd = lastLine[lastLine.length - 1].end;
+
           const chunkZoomIn = `\\fscx80\\fscy80\\t(0,50,\\fscx100\\fscy100)`;
-
           const colorIndex = Math.floor(globalChunkIndex / cycleAfter) % highlightColors.length;
           const highlightColorAss = toAssColor(highlightColors[colorIndex]);
 
-          // softer base glow (inactive)
-          const baseGlowAlpha = `\\alpha&H90&`; // very soft visibility
+          const renderedLines = chunkLines
+            .map((lineWords) => {
+              return lineWords
+                .map((word) => {
+                  const rel = Math.round((word.start - chunkStart) * 1000);
+                  const dur = Math.max(10, Math.round((word.end - word.start) * 1000));
+                  const highlightEnd = rel + dur;
+                  const txt = escapeAssText(word.text.toUpperCase());
 
-          // ACTIVE glow tweaks (reduced intensity)
-          const makeActiveGlow = (rel: number, dur: number) => {
-            const highlightEnd = rel + dur;
+                  // Crisp text with subtle black outline
+                  const base = `\\1c${baseColorAss}\\3c&H000000&\\bord0.6\\blur0.4\\shad0.15`;
 
-            // Reduced glow: Higher alpha (H80), smaller border (3), smaller blur (5)
-            const highlight = `\\t(${rel},${rel + 100},\\alpha&H80&\\1c${highlightColorAss}\\3c${highlightColorAss}\\bord3\\blur5)`;
-            const reset = `\\t(${highlightEnd},${highlightEnd + 100},\\alpha&H90&\\1c&H000000&\\3c&H000000&\\bord3\\blur4)`;
+                  const highlight = `\\t(${rel},${rel + 50},\\1c${highlightColorAss})`;
+                  const reset = `\\t(${highlightEnd},${highlightEnd + 50},\\1c${baseColorAss})`;
 
-            return { highlight, reset };
-          };
-
-          // LAYER 0: Glow
-          const sentenceGlow = chunk
-            .map((word) => {
-              const rel = Math.round((word.start - chunkStart) * 1000);
-              const dur = Math.max(10, Math.round((word.end - word.start) * 1000));
-              const active = makeActiveGlow(rel, dur);
-
-              const txt = escapeAssText(word.text.toUpperCase());
-
-              const base = `${baseGlowAlpha}\\1c&H000000&\\3c&H000000&\\bord3\\blur4`;
-
-              return `{${chunkZoomIn}${base}${active.highlight}${active.reset}}${txt}`;
+                  return `{${chunkZoomIn}${base}${highlight}${reset}}${txt}`;
+                })
+                .join(" ");
             })
-            .join(" ");
+            .join("\\N");
 
-          // LAYER 1: Core Text (inactive subtle glow added)
-          const sentenceCore = chunk
-            .map((word) => {
-              const rel = Math.round((word.start - chunkStart) * 1000);
-              const dur = Math.max(10, Math.round((word.end - word.start) * 1000));
-              const highlightEnd = rel + dur;
+          const glowLines = chunkLines
+            .map((lineWords) => {
+              return lineWords
+                .map((word) => {
+                  const rel = Math.round((word.start - chunkStart) * 1000);
+                  const dur = Math.max(10, Math.round((word.end - word.start) * 1000));
+                  const highlightEnd = rel + dur;
+                  const txt = escapeAssText(word.text.toUpperCase());
 
-              const txt = escapeAssText(word.text.toUpperCase());
+                  // Soft glow layer using highlight color with high transparency
+                  const base = `\\alpha&HCC&\\1c${highlightColorAss}\\bord0\\blur3\\shad0`;
+                  const activate = `\\t(${rel},${rel + 50},\\alpha&HAA&)`;
+                  const deactivate = `\\t(${highlightEnd},${highlightEnd + 80},\\alpha&HCC&)`;
 
-              // subtle glow for all inactive words
-              const base = `\\1c${baseColorAss}\\3c&H000000&\\bord2\\blur2`;
-
-              const highlight = `\\t(${rel},${rel + 50},\\1c${highlightColorAss})`;
-              const reset = `\\t(${highlightEnd},${highlightEnd + 50},\\1c${baseColorAss})`;
-
-              return `{${chunkZoomIn}${base}${highlight}${reset}}${txt}`;
+                  return `{${chunkZoomIn}${base}${activate}${deactivate}}${txt}`;
+                })
+                .join(" ");
             })
-            .join(" ");
+            .join("\\N");
 
-          const lineBreak = ci === 0 ? "" : "\\N";
           globalChunkIndex++;
 
-          const lineGlow = `Dialogue: 0,${formatAssTimestamp(chunkStart)},${formatAssTimestamp(
+          const glowDialogue = `Dialogue: 0,${formatAssTimestamp(chunkStart)},${formatAssTimestamp(
             chunkEnd
-          )},${template.name},,0,0,0,,${lineBreak}${sentenceGlow}`;
+          )},${template.name},,0,0,0,,${glowLines}`;
 
-          const lineCore = `Dialogue: 1,${formatAssTimestamp(chunkStart)},${formatAssTimestamp(
+          const coreDialogue = `Dialogue: 1,${formatAssTimestamp(chunkStart)},${formatAssTimestamp(
             chunkEnd
-          )},${template.name},,0,0,0,,${lineBreak}${sentenceCore}`;
+          )},${template.name},,0,0,0,,${renderedLines}`;
 
-          return `${lineGlow}\n${lineCore}`;
+          return `${glowDialogue}\n${coreDialogue}`;
         })
         .join("\n");
     })

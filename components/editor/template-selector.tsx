@@ -1,8 +1,7 @@
 "use client"
 
+import Image from "next/image"
 import { CheckCircle2 } from "lucide-react"
-import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
 import { cn } from "@/lib/utils"
 import { type TemplateOption } from "@/components/templates/types"
 
@@ -18,80 +17,53 @@ export function TemplateSelector({ templates, selectedTemplateId, onSelect, isPr
     <div className="grid gap-4 md:grid-cols-2">
       {templates.map((template) => {
         const isActive = template.id === selectedTemplateId
+
         const handleSelect = () => {
-          if (isProcessing) {
-            return
-          }
+          if (isProcessing) return
           onSelect(template.id)
         }
+
         return (
-          <Card
+          <button
             key={template.id}
-            role="button"
-            tabIndex={0}
+            type="button"
             onClick={handleSelect}
-            onKeyDown={(event) => {
-              if ((event.key === "Enter" || event.key === " ") && !isProcessing) {
-                event.preventDefault()
-                handleSelect()
-              }
-            }}
+            disabled={isProcessing}
+            aria-pressed={isActive}
             className={cn(
-              "relative overflow-hidden border-2 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
-              isProcessing ? "cursor-not-allowed opacity-80" : "cursor-pointer",
-              isActive ? "border-primary shadow-lg" : "border-border",
+              "group relative w-full overflow-hidden rounded-3xl border-2 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
+              isProcessing ? "cursor-not-allowed opacity-70" : "cursor-pointer hover:-translate-y-0.5",
+              isActive ? "border-primary shadow-xl" : "border-transparent",
             )}
           >
-            <div
-              className="pointer-events-none absolute inset-0 opacity-10"
-              style={{ background: template.background }}
-              aria-hidden="true"
-            />
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <span>{template.name}</span>
-                {template.badge && (
-                  <span className="text-xs font-semibold uppercase tracking-wide text-primary">{template.badge}</span>
-                )}
-              </CardTitle>
-              <CardDescription>{template.description}</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="h-32 rounded-xl border border-dashed border-border bg-background/70 p-4">
-                <div className="flex h-full flex-col justify-between">
-                  <div className="h-3 w-3/4 rounded-full" style={{ background: template.accent }} />
-                  <div className="space-y-2">
-                    <div className="h-2 rounded-full bg-foreground/10" />
-                    <div className="h-2 w-5/6 rounded-full bg-foreground/10" />
-                    <div className="h-2 w-2/3 rounded-full bg-foreground/10" />
-                  </div>
+            <div className="relative h-60 w-full">
+              {template.previewImage ? (
+                <Image
+                  src={template.previewImage}
+                  alt={`${template.name} preview`}
+                  fill
+                  sizes="(min-width: 768px) 45vw, 90vw"
+                  className="object-cover"
+                  priority={template.id === selectedTemplateId}
+                />
+              ) : (
+                <div className="h-full w-full" style={{ background: template.background }} />
+              )}
+              <div className="absolute inset-0 bg-linear-to-b from-black/10 via-black/40 to-black/80" />
+              {isActive && <div className="pointer-events-none absolute inset-0 border-4 border-primary/60" />}
+              <div className="absolute bottom-3 left-3 right-3 flex items-center justify-between rounded-2xl bg-black/50 px-4 py-3 text-white backdrop-blur">
+                <div className="max-w-[70%]">
+                  <p className="text-sm font-semibold leading-tight">{template.name}</p>
+                  <p className="text-xs text-white/80 line-clamp-2">{template.description}</p>
                 </div>
-              </div>
-            </CardContent>
-            <CardFooter className="flex justify-between">
-              <div className="flex items-center gap-2 text-sm text-muted-foreground">
                 {isActive ? (
-                  <>
-                    <CheckCircle2 className="h-4 w-4 text-primary" />
-                    <span>Selected</span>
-                  </>
-                ) : (
-                  <span>Render with this look</span>
-                )}
+                  <CheckCircle2 className="h-5 w-5 text-primary" />
+                ) : template.badge ? (
+                  <span className="text-xs font-semibold uppercase tracking-wide text-white/80">{template.badge}</span>
+                ) : null}
               </div>
-              <Button
-                size="sm"
-                variant={isActive ? "default" : "outline"}
-                disabled={isProcessing}
-                onClick={(event) => {
-                  event.stopPropagation()
-                  handleSelect()
-                }}
-              >
-                {isActive ? "Selected" : "Use template"}
-              </Button>
-            </CardFooter>
-          </Card>
+            </div>
+          </button>
         )
       })}
     </div>

@@ -92,6 +92,17 @@ async function processJob(payload: RenderJobPayload) {
 
   const jobId = payload.jobId
   const resolutionKey = resolveResolutionKey(payload.resolution)
+  let jobResultState: Record<string, any> = {}
+
+  const commitJobResultState = (patch: Record<string, any>) => {
+    jobResultState = { ...jobResultState, ...patch }
+    return jobResultState
+  }
+
+  const updateJobResult = async (patch: Record<string, any>) => {
+    commitJobResultState(patch)
+    await updateJob(jobId, { result: { ...jobResultState } })
+  }
 
   if (!resolutionKey) throw new Error(`Unsupported resolution: ${payload.resolution}`)
   const resolution = RENDER_RESOLUTIONS[resolutionKey]
@@ -128,6 +139,10 @@ async function processJob(payload: RenderJobPayload) {
     const { getVideoDuration } = require("./ffprobe-helper")
     const videoDuration = getVideoDuration(videoTmp)
     console.log("[worker] Video duration:", videoDuration)
+
+    if (typeof videoDuration === "number" && Number.isFinite(videoDuration) && videoDuration > 0) {
+      await updateJobResult({ progress: 0 })
+    }
 
     // Clamp overlays to video duration
     if (Array.isArray(payload.overlays) && typeof videoDuration === "number") {
@@ -181,6 +196,27 @@ async function processJob(payload: RenderJobPayload) {
       }
     }
 
+    let lastProgressRatio = 0
+    let lastProgressPersist = 0
+
+    const handleProgressTimestamp = (timestampSeconds: number) => {
+      if (typeof videoDuration !== "number" || !Number.isFinite(videoDuration) || videoDuration <= 0) {
+        return
+      }
+
+      const ratio = Math.max(0, Math.min(1, timestampSeconds / videoDuration))
+      const now = Date.now()
+      if (ratio - lastProgressRatio < 0.01 && now - lastProgressPersist < 1200) {
+        return
+      }
+      lastProgressRatio = ratio
+      lastProgressPersist = now
+
+      updateJobResult({ progress: Number(ratio.toFixed(4)) }).catch((error) => {
+        console.warn("[worker] Failed to persist progress", { jobId, error })
+      })
+    }
+
     await runFfmpeg(
       videoTmp,
       captionTmp,
@@ -189,7 +225,8 @@ async function processJob(payload: RenderJobPayload) {
       payload.template,
       `${resolution.width}x${resolution.height}`,
       overlayFiles,
-      fontsDir
+      fontsDir,
+      { onProgressTimestamp: handleProgressTimestamp }
     )
 
     const file = await fs.readFile(outputTmp)
@@ -217,10 +254,16 @@ async function processJob(payload: RenderJobPayload) {
       .createSignedUrl(payload.outputPath, 86400)
 
     console.log("[worker] Upload complete, updating job", { jobId })
+    commitJobResultState({
+      progress: 1,
+      downloadUrl: signed?.signedUrl,
+      storagePath: payload.outputPath,
+    })
+
     await updateJob(jobId, {
       status: "done",
       completed_at: new Date().toISOString(),
-      result: { downloadUrl: signed?.signedUrl, storagePath: payload.outputPath },
+      result: { ...jobResultState },
     })
 
     const { missingRenderColumn } = await updateUploadRenderState(payload.uploadId, {
@@ -240,6 +283,7 @@ async function processJob(payload: RenderJobPayload) {
       status: "failed",
       error: (err as Error).message,
       completed_at: new Date().toISOString(),
+      result: { ...jobResultState },
     })
 
     await supabase.from("uploads").update({
@@ -341,7 +385,8 @@ function runFfmpeg(
   template: CaptionTemplate,
   _res: string,
   overlays: RenderOverlay[] = [],
-  customFontsDir?: string
+  customFontsDir?: string,
+  options?: { onProgressTimestamp?: (seconds: number) => void }
 ) {
   // Center captions in the middle of the video using ASS alignment override (align=2)
   let forceStyle =
@@ -464,9 +509,32 @@ function runFfmpeg(
 
   return new Promise<void>((resolve, reject) => {
     const ff = spawn(ffmpegBinary, args) as ChildProcessWithoutNullStreams
-    ff.stderr.on("data", (chunk: Buffer) => console.log(chunk.toString()))
+    ff.stderr.on("data", (chunk: Buffer) => {
+      const payload = chunk.toString()
+      console.log(payload)
+
+      if (options?.onProgressTimestamp) {
+        const timestamps = extractTimestampSeconds(payload)
+        timestamps.forEach((seconds) => options.onProgressTimestamp?.(seconds))
+      }
+    })
     ff.on("close", (code: number | null) => (code === 0 ? resolve() : reject(new Error(`FFmpeg exited: ${code}`))))
   })
+}
+
+function extractTimestampSeconds(payload: string): number[] {
+  const matches = payload.match(/time=(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)/g)
+  if (!matches) return []
+
+  return matches
+    .map((entry) => {
+      const match = entry.match(/time=(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)/)
+      if (!match) return null
+      const [, hh, mm, ss] = match
+      const seconds = Number(hh) * 3600 + Number(mm) * 60 + Number(ss)
+      return Number.isFinite(seconds) ? seconds : null
+    })
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value))
 }
 
 async function safeUnlink(path: string) {

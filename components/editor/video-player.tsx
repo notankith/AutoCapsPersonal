@@ -8,6 +8,7 @@ import { cn } from "@/lib/utils"
 import { type CaptionSegment, type CaptionTemplate, type CaptionWord } from "@/lib/pipeline"
 import { Templates } from "@/components/templates/data"
 import { CanvasCaptionRenderer } from "@/components/editor/canvas-caption-renderer"
+import { CreatorKineticOverlay } from "@/components/editor/creator-kinetic-overlay"
 
 type PlayerCaption = CaptionSegment & {
   start_time?: number
@@ -90,6 +91,8 @@ export function VideoPlayer({
     return Templates[id] ?? Templates.minimal
   }, [templatePreviewId, templateStyle])
 
+  const staticOverlayConfig = useMemo(() => ({ scale: 1, x: 50, y: 85 }), [])
+
   // Precompute overlay segments which contain the keywords 'money', 'rich', or 'wealth' (case-insensitive)
   const overlaySegments = useMemo(
     () => captions.filter((c) => /\b(money|rich|wealth)\b/i.test(c.text)),
@@ -134,12 +137,16 @@ export function VideoPlayer({
         <video ref={videoRef} src={videoUrl} className="w-full h-full object-contain" muted={isMuted} />
 
         {/* Caption Overlay */}
-        <CanvasCaptionRenderer
-          videoRef={videoRef}
-          captions={captions}
-          template={templateObj}
-          onCaptionPosition={({ y }) => setOverlayTop(y)}
-        />
+        {templateObj.name === "CreatorKinetic" ? (
+          <CreatorKineticOverlay videoRef={videoRef} captions={captions} config={staticOverlayConfig} />
+        ) : (
+          <CanvasCaptionRenderer
+            videoRef={videoRef}
+            captions={captions}
+            template={templateObj}
+            onCaptionPosition={({ y }) => setOverlayTop(y)}
+          />
+        )}
 
         {/* Play Button Overlay */}
         {!isPlaying && (

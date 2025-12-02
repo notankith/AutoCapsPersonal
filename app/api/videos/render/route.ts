@@ -46,7 +46,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: (lookupError as Error).message }, { status: 404 })
     }
 
-    const captionFile = buildCaptionFile(body.template, captionSource.segments)
+    const captionFile = buildCaptionFile(body.template, captionSource.segments, body.customStyles)
     const captionBuffer = Buffer.from(captionFile.content, "utf-8")
 
 

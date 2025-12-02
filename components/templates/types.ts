@@ -29,4 +29,5 @@ export type TemplateOption = {
   background: string
   badge?: string
   renderTemplate: string
+  previewImage?: string
 }
