@@ -1,7 +1,8 @@
-import { createClient } from "@/lib/supabase/server"
+import { getDb } from "@/lib/mongodb"
 import { type CaptionSegment } from "@/lib/pipeline"
 import { z } from "zod"
 import { type NextRequest, NextResponse } from "next/server"
+import { ObjectId } from "mongodb"
 
 const overrideSegmentSchema = z.object({
   id: z.string().optional(),
@@ -9,7 +10,7 @@ const overrideSegmentSchema = z.object({
 })
 
 const requestSchema = z.object({
-  transcriptId: z.string().uuid(),
+  transcriptId: z.string().min(1),
   targetLanguage: z.string().min(2),
   useMocks: z.boolean().optional(),
   override: z
@@ -27,56 +28,50 @@ type TranslationResponse = {
 }
 
 export async function POST(request: NextRequest) {
-  const supabase = await createClient()
+  const db = await getDb()
   const openAiKey = process.env.OPENAI_API_KEY?.trim() || null
   const mocksAllowed = process.env.ENABLE_OPENAI_MOCKS === "true"
+  
+  // TODO: Get userId from JWT token instead of hardcoding
+  const userId = "default-user"
 
   try {
     const body = requestSchema.parse(await request.json())
-    const {
-      data: { user },
-    } = await supabase.auth.getUser()
 
-    if (!user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+    let transcript
+    try {
+      transcript = await db.collection("transcripts").findOne({
+        _id: new ObjectId(body.transcriptId),
+        user_id: userId,
+      })
+    } catch (error) {
+      return NextResponse.json({ error: "Invalid transcript ID format" }, { status: 400 })
     }
 
-    const { data: transcript, error: transcriptError } = await supabase
-      .from("transcripts")
-      .select("id, upload_id, text, segments")
-      .eq("id", body.transcriptId)
-      .eq("user_id", user.id)
-      .single()
-
-    if (transcriptError || !transcript) {
+    if (!transcript) {
       return NextResponse.json({ error: "Transcript not found" }, { status: 404 })
     }
 
-    const { data: job, error: jobError } = await supabase
-      .from("jobs")
-      .insert({
-        upload_id: transcript.upload_id,
-        user_id: user.id,
-        type: "translation",
-        payload: { transcriptId: transcript.id, targetLanguage: body.targetLanguage },
-      })
-      .select()
-      .single()
+    const jobResult = await db.collection("jobs").insertOne({
+      upload_id: transcript.upload_id,
+      user_id: userId,
+      type: "translation",
+      payload: { transcriptId: transcript._id.toString(), targetLanguage: body.targetLanguage },
+      status: "pending",
+      created_at: new Date(),
+    })
 
-    if (jobError || !job) {
-      console.error("Unable to insert translation job", jobError)
-      return NextResponse.json({ error: "Failed to queue translation" }, { status: 500 })
-    }
+    const jobId = jobResult.insertedId.toString()
 
-    await supabase
-      .from("jobs")
-      .update({ status: "processing", started_at: new Date().toISOString() })
-      .eq("id", job.id)
+    await db.collection("jobs").updateOne(
+      { _id: jobResult.insertedId },
+      { $set: { status: "processing", started_at: new Date() } }
+    )
 
     const useMocks = Boolean(body.useMocks && mocksAllowed)
 
     if (!body.override && !useMocks && !openAiKey) {
-      await markJobFailed(supabase, job.id, "OPENAI_API_KEY missing")
+      await markJobFailed(db, jobId, "OPENAI_API_KEY missing")
       return NextResponse.json(
         { error: "OPENAI_API_KEY missing. Provide override data, enable ENABLE_OPENAI_MOCKS, or add your API key." },
         { status: 400 },
@@ -112,42 +107,44 @@ export async function POST(request: NextRequest) {
 
     const translatedText = translationSource.text ?? translatedSegments.map((segment) => segment.text).join(" ")
 
-    const { data: newTranslation, error: insertError } = await supabase
-      .from("translations")
-      .insert({
-        transcript_id: transcript.id,
-        user_id: user.id,
-        target_language: body.targetLanguage,
-        model: translationSource.model,
-        text: translatedText,
-        segments: translatedSegments,
-      })
-      .select()
-      .single()
+    const translationResult = await db.collection("translations").insertOne({
+      transcript_id: transcript._id.toString(),
+      upload_id: transcript.upload_id,
+      user_id: userId,
+      target_language: body.targetLanguage,
+      model: translationSource.model,
+      text: translatedText,
+      segments: translatedSegments,
+      created_at: new Date(),
+    })
 
-    if (insertError || !newTranslation) {
-      console.error("Failed to persist translation", insertError)
-      await markJobFailed(supabase, job.id, "Could not save translation")
-      return NextResponse.json({ error: "Could not save translation" }, { status: 500 })
-    }
+    const translationId = translationResult.insertedId.toString()
 
-    await supabase
-      .from("uploads")
-      .update({ status: "translated", latest_translation_id: newTranslation.id, updated_at: new Date().toISOString() })
-      .eq("id", transcript.upload_id)
+    await db.collection("uploads").updateOne(
+      { _id: new ObjectId(transcript.upload_id) },
+      { 
+        $set: { 
+          status: "translated", 
+          latest_translation_id: translationId, 
+          updated_at: new Date() 
+        } 
+      }
+    )
 
-    await supabase
-      .from("jobs")
-      .update({
-        status: "done",
-        completed_at: new Date().toISOString(),
-        result: { translationId: newTranslation.id, segments: translatedSegments.length },
-      })
-      .eq("id", job.id)
+    await db.collection("jobs").updateOne(
+      { _id: jobResult.insertedId },
+      {
+        $set: {
+          status: "done",
+          completed_at: new Date(),
+          result: { translationId, segments: translatedSegments.length },
+        }
+      }
+    )
 
     return NextResponse.json({
-      translationId: newTranslation.id,
-      jobId: job.id,
+      translationId,
+      jobId,
       targetLanguage: body.targetLanguage,
       segments: translatedSegments,
     })
@@ -248,14 +245,20 @@ async function translateSegments(
 }
 
 async function markJobFailed(
-  supabase: Awaited<ReturnType<typeof createClient>>,
+  db: Awaited<ReturnType<typeof getDb>>,
   jobId: string,
   errorMessage: string,
 ) {
-  await supabase
-    .from("jobs")
-    .update({ status: "failed", error: errorMessage, completed_at: new Date().toISOString() })
-    .eq("id", jobId)
+  await db.collection("jobs").updateOne(
+    { _id: new ObjectId(jobId) },
+    { 
+      $set: { 
+        status: "failed", 
+        error: errorMessage, 
+        completed_at: new Date() 
+      } 
+    }
+  )
 }
 
 function buildOverrideTranslation({

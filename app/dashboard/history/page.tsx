@@ -1,5 +1,4 @@
-import { createClient } from "@/lib/supabase/server"
-import { redirect } from "next/navigation"
+import { getDb } from "@/lib/mongodb"
 import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -18,27 +17,30 @@ interface UploadHistoryEntry {
 }
 
 export default async function HistoryPage() {
-  const supabase = await createClient()
+  // TODO: Get user from session/JWT token
+  const userId = "default-user" // Temporary until auth is implemented
 
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const db = await getDb()
+  
+  let uploads: UploadHistoryEntry[] = []
+  try {
+    const data = await db.collection("uploads")
+      .find({ user_id: userId })
+      .sort({ updated_at: -1 })
+      .toArray()
 
-  if (!user) {
-    redirect("/auth/login")
+    uploads = data.map(doc => ({
+      id: doc._id.toString(),
+      file_name: doc.file_name,
+      file_size: doc.file_size,
+      duration_seconds: doc.duration_seconds,
+      status: doc.status,
+      created_at: doc.created_at?.toISOString() || new Date().toISOString(),
+      updated_at: doc.updated_at?.toISOString() || null,
+    }))
+  } catch (error) {
+    console.error("Error fetching uploads:", error)
   }
-
-  const { data, error: fetchError } = await supabase
-    .from("uploads")
-    .select("id,file_name,file_size,duration_seconds,status,created_at,updated_at")
-    .eq("user_id", user.id)
-    .order("updated_at", { ascending: false })
-
-  if (fetchError) {
-    console.error("Error fetching videos:", fetchError.message ?? fetchError)
-  }
-
-  const uploads: UploadHistoryEntry[] = (data ?? []) as UploadHistoryEntry[]
 
   const formatFileSize = (bytes: number | null) => {
     if (!bytes || Number.isNaN(bytes)) return "—"

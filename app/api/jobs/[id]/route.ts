@@ -1,50 +1,65 @@
-import { createClient } from "@/lib/supabase/server"
-import { createAdminClient } from "@/lib/supabase/admin"
+import { getDb } from "@/lib/mongodb"
 import { type NextRequest, NextResponse } from "next/server"
-import { z } from "zod"
-
-const paramsSchema = z.object({
-  id: z.string().uuid(),
-})
+import { ObjectId } from "mongodb"
 
 export async function GET(_req: NextRequest, context: { params: Promise<{ id: string }> }) {
-  const supabase = await createClient()
-  const admin = createAdminClient()
+  const db = await getDb()
+  
+  // TODO: Get userId from JWT token instead of hardcoding
+  const userId = "default-user"
 
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  const { id } = await context.params
 
-  if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  let job
+  try {
+    job = await db.collection("jobs").findOne({
+      _id: new ObjectId(id),
+    })
+  } catch (error) {
+    return NextResponse.json({ error: "Invalid job ID format" }, { status: 400 })
   }
 
-  const { id } = paramsSchema.parse(await context.params)
-
-  const { data: job, error } = await admin.from("jobs").select("*").eq("id", id).single()
-
-  type JobRecord = Record<string, unknown> & { user_id: string }
-  const jobRecord = job as JobRecord | null
-
-  if (error || !jobRecord || jobRecord.user_id !== user.id) {
+  if (!job || job.user_id !== userId) {
     console.warn("Job fetch mismatch", {
       jobId: id,
-      jobUserId: jobRecord?.user_id,
-      requestUserId: user.id,
-      error: error?.message,
+      jobUserId: job?.user_id,
+      requestUserId: userId,
     })
     return NextResponse.json({ error: "Job not found" }, { status: 404 })
   }
 
   let upload = null
-  if (jobRecord.upload_id) {
-    const { data: uploadRow } = await admin
-      .from("uploads")
-      .select("id, status, storage_path, render_asset_path")
-      .eq("id", jobRecord.upload_id as string)
-      .maybeSingle()
-    upload = uploadRow ?? null
+  if (job.upload_id) {
+    try {
+      upload = await db.collection("uploads").findOne(
+        { _id: new ObjectId(job.upload_id) },
+        { projection: { _id: 1, status: 1, storage_path: 1, render_asset_path: 1 } }
+      )
+    } catch (error) {
+      console.warn("Failed to fetch upload for job", { jobId: id, uploadId: job.upload_id })
+    }
   }
 
-  return NextResponse.json({ job: jobRecord, upload })
+  // Convert MongoDB ObjectId to string for JSON serialization
+  const jobResponse = {
+    ...job,
+    _id: job._id.toString(),
+    id: job._id.toString(), // Keep backward compatibility
+  }
+
+  const uploadResponse = upload ? {
+    ...upload,
+    _id: upload._id.toString(),
+    id: upload._id.toString(),
+  } : null
+
+  console.log("[jobs API] Returning job status", {
+    jobId: id,
+    status: jobResponse.status,
+    hasResult: !!jobResponse.result,
+    hasDownloadUrl: !!jobResponse.result?.downloadUrl,
+    downloadUrl: jobResponse.result?.downloadUrl,
+  })
+
+  return NextResponse.json({ job: jobResponse, upload: uploadResponse })
 }

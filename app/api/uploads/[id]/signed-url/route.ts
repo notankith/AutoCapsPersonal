@@ -1,39 +1,30 @@
 import { type NextRequest, NextResponse } from "next/server"
-import { createClient } from "@/lib/supabase/server"
-import { createAdminClient } from "@/lib/supabase/admin"
-import { STORAGE_BUCKETS } from "@/lib/pipeline"
+import { getDb } from "@/lib/mongodb"
+import { getPublicUrl } from "@/lib/oracle-storage"
+import { ObjectId } from "mongodb"
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  const [{ id }, supabase] = await Promise.all([params, createClient()])
+  const { id } = await params
+  const db = await getDb()
+  
+  // TODO: Get userId from JWT token instead of hardcoding
+  const userId = "default-user"
 
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
-
-  if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  let upload
+  try {
+    upload = await db.collection("uploads").findOne({
+      _id: new ObjectId(id),
+      user_id: userId,
+    })
+  } catch (error) {
+    return NextResponse.json({ error: "Invalid upload ID format" }, { status: 400 })
   }
 
-  const { data: upload, error: uploadError } = await supabase
-    .from("uploads")
-    .select("id, storage_path")
-    .eq("id", id)
-    .eq("user_id", user.id)
-    .single()
-
-  if (uploadError || !upload) {
+  if (!upload) {
     return NextResponse.json({ error: "Upload not found" }, { status: 404 })
   }
 
-  const admin = createAdminClient()
-  const { data, error } = await admin
-    .storage
-    .from(STORAGE_BUCKETS.uploads)
-    .createSignedUrl(upload.storage_path, 60 * 15)
+  const signedUrl = getPublicUrl(upload.storage_path)
 
-  if (error || !data?.signedUrl) {
-    return NextResponse.json({ error: error?.message ?? "Video not ready" }, { status: 404 })
-  }
-
-  return NextResponse.json({ signedUrl: data.signedUrl })
+  return NextResponse.json({ signedUrl })
 }

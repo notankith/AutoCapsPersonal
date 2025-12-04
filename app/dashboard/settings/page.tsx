@@ -1,26 +1,19 @@
-import { createClient } from "@/lib/supabase/server"
-import { redirect } from "next/navigation"
+import { getDb } from "@/lib/mongodb"
 import { SettingsTabs } from "@/components/settings/settings-tabs"
 
 export default async function SettingsPage() {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  // TODO: Get user from session/JWT token
+  const userId = "default-user" // Temporary until auth is implemented
 
-  if (!user) {
-    redirect("/auth/login")
-  }
-
+  const db = await getDb()
+  
   // Fetch user profile and subscription
-  const { data: profile } = await supabase.from("profiles").select("*").eq("id", user.id).single()
-
-  const { data: subscription } = await supabase
-    .from("subscriptions")
-    .select("*")
-    .eq("user_id", user.id)
-    .eq("status", "active")
-    .single()
+  const user = await db.collection("users").findOne({ _id: userId as any })
+  const profile = await db.collection("profiles").findOne({ user_id: userId })
+  const subscription = await db.collection("subscriptions").findOne({ 
+    user_id: userId,
+    status: "active" 
+  })
 
   return (
     <div className="p-8 space-y-6 max-w-4xl">

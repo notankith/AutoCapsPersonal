@@ -1,27 +1,26 @@
-import { createClient } from "@/lib/supabase/server"
-import { createAdminClient } from "@/lib/supabase/admin"
-import { STORAGE_BUCKETS } from "@/lib/pipeline"
+import { getDb } from "@/lib/mongodb"
+import { getPublicUrl } from "@/lib/oracle-storage"
 import { NextResponse, type NextRequest } from "next/server"
+import { ObjectId } from "mongodb"
 
 export async function GET(_request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  const [{ id }, supabase] = await Promise.all([params, createClient()])
+  const { id } = await params
+  const db = await getDb()
+  
+  // TODO: Get userId from JWT token instead of hardcoding
+  const userId = "default-user"
 
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
-
-  if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  let upload
+  try {
+    upload = await db.collection("uploads").findOne({
+      _id: new ObjectId(id),
+      user_id: userId,
+    })
+  } catch (error) {
+    return NextResponse.json({ error: "Invalid upload ID format" }, { status: 400 })
   }
 
-  const { data: upload, error } = await supabase
-    .from("uploads")
-    .select("id, render_asset_path")
-    .eq("id", id)
-    .eq("user_id", user.id)
-    .single()
-
-  if (error || !upload) {
+  if (!upload) {
     return NextResponse.json({ error: "Upload not found" }, { status: 404 })
   }
 
@@ -29,15 +28,7 @@ export async function GET(_request: NextRequest, { params }: { params: Promise<{
     return NextResponse.json({ error: "Rendered file not ready" }, { status: 404 })
   }
 
-  const admin = createAdminClient()
-  const { data, error: urlError } = await admin
-    .storage
-    .from(STORAGE_BUCKETS.renders)
-    .createSignedUrl(upload.render_asset_path, 60 * 60)
+  const signedUrl = getPublicUrl(upload.render_asset_path)
 
-  if (urlError || !data?.signedUrl) {
-    return NextResponse.json({ error: urlError?.message ?? "Unable to sign render asset" }, { status: 500 })
-  }
-
-  return NextResponse.json({ signedUrl: data.signedUrl })
+  return NextResponse.json({ signedUrl })
 }

@@ -1,8 +1,8 @@
-import { createClient } from "@/lib/supabase/server"
-import { createAdminClient } from "@/lib/supabase/admin"
+import { getDb } from "@/lib/mongodb"
+import { uploadFile } from "@/lib/oracle-storage"
 import { buildCaptionFile } from "@/lib/captions"
 import {
-  STORAGE_BUCKETS,
+  STORAGE_PREFIX,
   captionRequestSchema,
   assertEnv,
   type CaptionSegment
@@ -11,37 +11,36 @@ import {
 import jwt from "jsonwebtoken"
 import { type NextRequest, NextResponse } from "next/server"
 import { z } from "zod"
+import { ObjectId } from "mongodb"
 
 export async function POST(request: NextRequest) {
-  const supabase = await createClient()
-  const admin = createAdminClient()
+  const db = await getDb()
+  
+  // TODO: Get userId from JWT token instead of hardcoding
+  const userId = "default-user"
 
   try {
     const body = captionRequestSchema.parse(await request.json())
-    const {
-      data: { user },
-    } = await supabase.auth.getUser()
-
-    if (!user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
-    }
 
     // Fetch upload row
-    const { data: upload, error: uploadError } = await supabase
-      .from("uploads")
-      .select("*")
-      .eq("id", body.uploadId)
-      .eq("user_id", user.id)
-      .single()
+    let upload
+    try {
+      upload = await db.collection("uploads").findOne({
+        _id: new ObjectId(body.uploadId),
+        user_id: userId,
+      })
+    } catch (error) {
+      return NextResponse.json({ error: "Invalid upload ID format" }, { status: 400 })
+    }
 
-    if (uploadError || !upload) {
+    if (!upload) {
       return NextResponse.json({ error: "Upload not found" }, { status: 404 })
     }
 
     // Build caption segments
     let captionSource
     try {
-      captionSource = await resolveCaptionSource(supabase, upload.id, user.id, body)
+      captionSource = await resolveCaptionSource(db, upload._id.toString(), userId, body)
     } catch (lookupError) {
       return NextResponse.json({ error: (lookupError as Error).message }, { status: 404 })
     }
@@ -74,73 +73,71 @@ export async function POST(request: NextRequest) {
     }
 
     // Create job
-    const { data: job, error: jobError } = await supabase
-      .from("jobs")
-      .insert({
-        upload_id: upload.id,
-        user_id: user.id,
-        type: "render",
-        payload: basePayload,
-        status: "queued",
-      })
-      .select()
-      .single()
+    const jobResult = await db.collection("jobs").insertOne({
+      upload_id: upload._id.toString(),
+      user_id: userId,
+      type: "render",
+      payload: basePayload,
+      status: "queued",
+      created_at: new Date(),
+    })
 
-    if (jobError || !job) {
-      console.error("Unable to create render job", jobError)
-      return NextResponse.json({ error: "Failed to queue render job" }, { status: 500 })
-    }
+    const jobId = jobResult.insertedId.toString()
 
     // Upload caption file
-    const captionPath = `${upload.user_id}/${upload.id}/${job.id}.${captionFile.format}`
+    const captionPath = `${STORAGE_PREFIX.captions}/${upload.user_id}/${upload._id.toString()}/${jobId}.${captionFile.format}`
 
-    await supabase
-      .from("jobs")
-      .update({ payload: { ...basePayload, captionPath } })
-      .eq("id", job.id)
+    await db.collection("jobs").updateOne(
+      { _id: jobResult.insertedId },
+      { $set: { payload: { ...basePayload, captionPath } } }
+    )
 
-    const { error: captionUploadError } = await admin.storage
-      .from(STORAGE_BUCKETS.captions)
-      .upload(captionPath, captionBuffer, {
-        upsert: true,
-        contentType: captionFile.format === "srt" ? "text/plain" : "text/x-ass",
-      })
-
-    if (captionUploadError) {
+    try {
+      await uploadFile(
+        captionPath,
+        captionBuffer,
+        captionFile.format === "srt" ? "text/plain" : "text/x-ass"
+      )
+    } catch (captionUploadError) {
       console.error("Unable to upload caption file", captionUploadError)
-      await supabase.from("jobs").update({ status: "failed" }).eq("id", job.id)
+      await db.collection("jobs").updateOne(
+        { _id: jobResult.insertedId },
+        { $set: { status: "failed" } }
+      )
       return NextResponse.json({ error: "Failed to store caption file" }, { status: 500 })
     }
 
     // Update upload status
-    await supabase
-      .from("uploads")
-      .update({
-        status: "rendering",
-        caption_asset_path: captionPath,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", upload.id)
+    await db.collection("uploads").updateOne(
+      { _id: upload._id },
+      {
+        $set: {
+          status: "rendering",
+          caption_asset_path: captionPath,
+          updated_at: new Date(),
+        }
+      }
+    )
 
     // Worker vars
     const workerUrl = assertEnv("FFMPEG_WORKER_URL", process.env.FFMPEG_WORKER_URL)
     const workerSecret = assertEnv("WORKER_JWT_SECRET", process.env.WORKER_JWT_SECRET)
 
-    const token = jwt.sign({ jobId: job.id, uploadId: upload.id }, workerSecret, {
+    const token = jwt.sign({ jobId, uploadId: upload._id.toString() }, workerSecret, {
       expiresIn: "10m",
     })
 
     // overlays already computed above
 
     const renderPayload = {
-      jobId: job.id,
-      uploadId: upload.id,
+      jobId,
+      uploadId: upload._id.toString(),
       videoPath: upload.storage_path,
       captionPath,
       captionFormat: captionFile.format,
       template: body.template,
       resolution: body.resolution,
-      outputPath: `${upload.user_id}/${job.id}/rendered.mp4`,
+      outputPath: `${STORAGE_PREFIX.renders}/${upload.user_id}/${jobId}/rendered.mp4`,
       overlays,
     }
 
@@ -158,20 +155,25 @@ export async function POST(request: NextRequest) {
       const reason = await workerResponse.text()
       console.error("Worker rejected render job", reason)
 
-      await supabase.from("jobs").update({
-        status: "failed",
-        error: "Worker rejected job",
-      }).eq("id", job.id)
+      await db.collection("jobs").updateOne(
+        { _id: jobResult.insertedId },
+        {
+          $set: {
+            status: "failed",
+            error: "Worker rejected job",
+          }
+        }
+      )
 
       return NextResponse.json({ error: "Worker rejected job" }, { status: 502 })
     }
 
     return NextResponse.json({
-      jobId: job.id,
-      uploadId: upload.id,
+      jobId,
+      uploadId: upload._id.toString(),
       captionPath,
       videoPath: upload.storage_path,
-      outputPath: `${upload.user_id}/${job.id}/rendered.mp4`,
+      outputPath: `${STORAGE_PREFIX.renders}/${upload.user_id}/${jobId}/rendered.mp4`,
       status: "queued",
     })
   } catch (error) {
@@ -185,7 +187,7 @@ export async function POST(request: NextRequest) {
 
 // fetch transcript/translation
 async function resolveCaptionSource(
-  supabase: Awaited<ReturnType<typeof createClient>>,
+  db: Awaited<ReturnType<typeof getDb>>,
   uploadId: string,
   userId: string,
   body: z.infer<typeof captionRequestSchema>,
@@ -221,39 +223,57 @@ async function resolveCaptionSource(
   }
 
   if (body.translationId) {
-    const { data: translation, error } = await supabase
-      .from("translations")
-      .select("id, segments, transcript_id, transcripts!inner(id, upload_id)")
-      .eq("id", body.translationId)
-      .eq("user_id", userId)
-      .eq("transcripts.upload_id", uploadId)
-      .single()
+    let translation
+    try {
+      translation = await db.collection("translations").findOne({
+        _id: new ObjectId(body.translationId),
+        user_id: userId,
+      })
+    } catch (error) {
+      throw new Error("Invalid translation ID format")
+    }
 
-    if (error || !translation) throw new Error("Translation not found")
+    if (!translation) throw new Error("Translation not found")
+
+    // Verify translation belongs to correct upload
+    const transcript = await db.collection("transcripts").findOne({
+      _id: new ObjectId(translation.transcript_id),
+      upload_id: uploadId,
+    })
+
+    if (!transcript) throw new Error("Translation not found for this upload")
 
     return {
       transcriptId: translation.transcript_id,
-      translationId: translation.id,
+      translationId: translation._id.toString(),
       segments: translation.segments as CaptionSegment[],
     }
   }
 
   const transcriptId = body.transcriptId ?? null
-  const filter = transcriptId ? { col: "id", value: transcriptId } : { col: "upload_id", value: uploadId }
+  let transcript
 
-  const { data: transcript, error } = await supabase
-    .from("transcripts")
-    .select("id, segments")
-    .eq(filter.col, filter.value)
-    .eq("user_id", userId)
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .single()
+  if (transcriptId) {
+    try {
+      transcript = await db.collection("transcripts").findOne({
+        _id: new ObjectId(transcriptId),
+        user_id: userId,
+      })
+    } catch (error) {
+      throw new Error("Invalid transcript ID format")
+    }
+  } else {
+    transcript = await db.collection("transcripts")
+      .find({ upload_id: uploadId, user_id: userId })
+      .sort({ created_at: -1 })
+      .limit(1)
+      .next()
+  }
 
-  if (error || !transcript) throw new Error("Transcript not found")
+  if (!transcript) throw new Error("Transcript not found")
 
   return {
-    transcriptId: transcript.id,
+    transcriptId: transcript._id.toString(),
     translationId: null,
     segments: transcript.segments as CaptionSegment[],
   }

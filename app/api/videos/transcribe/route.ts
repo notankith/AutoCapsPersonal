@@ -1,8 +1,9 @@
-import { createClient } from "@/lib/supabase/server"
-import { createAdminClient } from "@/lib/supabase/admin"
-import { STORAGE_BUCKETS, type CaptionSegment } from "@/lib/pipeline"
+import { getDb } from "@/lib/mongodb"
+import { downloadFile, getPublicUrl } from "@/lib/oracle-storage"
+import { STORAGE_PREFIX, type CaptionSegment } from "@/lib/pipeline"
 import { z } from "zod"
 import { type NextRequest, NextResponse } from "next/server"
+import { ObjectId } from "mongodb"
 const ASSEMBLYAI_API_BASE = "https://api.assemblyai.com/v2"
 const ASSEMBLYAI_POLL_INTERVAL_MS = Number(process.env.ASSEMBLYAI_POLL_INTERVAL_MS ?? 5000)
 const ASSEMBLYAI_MAX_POLL_DURATION_MS = Number(process.env.ASSEMBLYAI_MAX_POLL_MS ?? 15 * 60 * 1000)
@@ -22,7 +23,7 @@ const manualSegmentSchema = z.object({
 })
 
 const requestSchema = z.object({
-  uploadId: z.string().uuid(),
+  uploadId: z.string().min(1),
   language: z.string().optional(),
   useMocks: z.boolean().optional(),
   override: z
@@ -56,30 +57,28 @@ const ASSEMBLYAI_UPLOAD_HEADERS = {
 }
 
 export async function POST(request: NextRequest) {
-  const supabase = await createClient()
-  const admin = createAdminClient()
+  const db = await getDb()
   const assemblyApiKey = process.env.ASSEMBLYAI_API_KEY?.trim() || null
   const assemblyModel = process.env.ASSEMBLYAI_MODEL?.trim()
   const mocksAllowed = process.env.ENABLE_TRANSCRIPTION_MOCKS === "true"
+  
+  // TODO: Get userId from JWT token instead of hardcoding
+  const userId = "default-user"
 
   try {
     const body = requestSchema.parse(await request.json())
-    const {
-      data: { user },
-    } = await supabase.auth.getUser()
 
-    if (!user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+    let upload
+    try {
+      upload = await db.collection("uploads").findOne({
+        _id: new ObjectId(body.uploadId),
+        user_id: userId,
+      })
+    } catch (error) {
+      return NextResponse.json({ error: "Invalid upload ID format" }, { status: 400 })
     }
 
-    const { data: upload, error: uploadError } = await supabase
-      .from("uploads")
-      .select("*")
-      .eq("id", body.uploadId)
-      .eq("user_id", user.id)
-      .single()
-
-    if (uploadError || !upload) {
+    if (!upload) {
       return NextResponse.json({ error: "Upload not found" }, { status: 404 })
     }
 
@@ -90,20 +89,22 @@ export async function POST(request: NextRequest) {
     const reuseExistingTranscript = !body.forceRefresh && !body.override
 
     if (reuseExistingTranscript) {
-      const { data: existingTranscript, error: transcriptLookupError } = await supabase
-        .from("transcripts")
-        .select("id, text, segments, source_language")
-        .eq("upload_id", body.uploadId)
-        .eq("user_id", user.id)
-        .order("created_at", { ascending: false })
+      const existingTranscript = await db.collection("transcripts")
+        .find({ upload_id: body.uploadId, user_id: userId })
+        .sort({ created_at: -1 })
         .limit(1)
-        .maybeSingle()
+        .toArray()
 
-      if (!transcriptLookupError && existingTranscript) {
+      if (existingTranscript.length > 0) {
+        const transcript = existingTranscript[0]
         const previewPayload = await buildPreviewResponse({
-          admin,
           upload,
-          transcript: existingTranscript,
+          transcript: {
+            id: transcript._id.toString(),
+            text: transcript.text,
+            segments: transcript.segments,
+            source_language: transcript.source_language,
+          },
           jobId: null,
         })
 
@@ -111,31 +112,31 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const { data: job, error: jobError } = await supabase
-      .from("jobs")
-      .insert({
-        upload_id: upload.id,
-        user_id: user.id,
-        type: "transcription",
-        payload: { language: body.language },
-      })
-      .select()
-      .single()
+    const jobResult = await db.collection("jobs").insertOne({
+      upload_id: upload._id.toString(),
+      user_id: userId,
+      type: "transcription",
+      payload: { language: body.language },
+      status: "pending",
+      created_at: new Date(),
+    })
 
-    if (jobError || !job) {
-      console.error("Unable to create transcription job", jobError)
-      return NextResponse.json({ error: "Failed to start transcription" }, { status: 500 })
-    }
+    const jobId = jobResult.insertedId.toString()
 
-    await supabase
-      .from("jobs")
-      .update({ status: "processing", started_at: new Date().toISOString() })
-      .eq("id", job.id)
+    await db.collection("jobs").updateOne(
+      { _id: jobResult.insertedId },
+      { 
+        $set: { 
+          status: "processing", 
+          started_at: new Date() 
+        } 
+      }
+    )
 
     const useMocks = Boolean(body.useMocks && mocksAllowed)
 
     if (!body.override && !useMocks && !assemblyApiKey) {
-      await markJobFailed(supabase, job.id, "No transcription provider configured")
+      await markJobFailed(db, jobId, "No transcription provider configured")
       return NextResponse.json(
         {
           error:
@@ -146,15 +147,14 @@ export async function POST(request: NextRequest) {
     }
 
     const transcriptionSource = await resolveTranscriptionSource({
-      admin,
       upload,
       language: body.language,
       override: body.override,
       useMocks,
       assemblyApiKey,
       assemblyModel,
-      jobId: job.id,
-      supabase,
+      jobId,
+      db,
     })
 
     if (!transcriptionSource) {
@@ -163,46 +163,51 @@ export async function POST(request: NextRequest) {
 
     const { segments, transcriptText, detectedLanguage, model, rawResponse } = transcriptionSource
 
-    const { data: transcript, error: transcriptError } = await supabase
-      .from("transcripts")
-      .insert({
-        upload_id: upload.id,
-        user_id: user.id,
-        source_language: detectedLanguage,
-        model,
-        text: transcriptText,
-        segments,
-        words: segments.flatMap((segment) => segment.words ?? []),
-        raw_payload: rawResponse ?? null,
-      })
-      .select()
-      .single()
+    const transcriptResult = await db.collection("transcripts").insertOne({
+      upload_id: upload._id.toString(),
+      user_id: userId,
+      source_language: detectedLanguage,
+      model,
+      text: transcriptText,
+      segments,
+      words: segments.flatMap((segment) => segment.words ?? []),
+      raw_payload: rawResponse ?? null,
+      created_at: new Date(),
+    })
 
-    if (transcriptError || !transcript) {
-      console.error("Failed to save transcript", transcriptError)
-      await markJobFailed(supabase, job.id, "Database error while storing transcript")
-      return NextResponse.json({ error: "Could not save transcript" }, { status: 500 })
-    }
+    const transcriptId = transcriptResult.insertedId.toString()
 
-    await supabase
-      .from("uploads")
-      .update({ status: "transcribed", latest_transcript_id: transcript.id, updated_at: new Date().toISOString() })
-      .eq("id", upload.id)
+    await db.collection("uploads").updateOne(
+      { _id: upload._id },
+      { 
+        $set: { 
+          status: "transcribed", 
+          latest_transcript_id: transcriptId, 
+          updated_at: new Date() 
+        } 
+      }
+    )
 
-    await supabase
-      .from("jobs")
-      .update({
-        status: "done",
-        completed_at: new Date().toISOString(),
-        result: { transcriptId: transcript.id, segmentsCount: segments.length },
-      })
-      .eq("id", job.id)
+    await db.collection("jobs").updateOne(
+      { _id: new ObjectId(jobId) },
+      {
+        $set: {
+          status: "done",
+          completed_at: new Date(),
+          result: { transcriptId, segmentsCount: segments.length },
+        }
+      }
+    )
 
     const previewPayload = await buildPreviewResponse({
-      admin,
       upload,
-      transcript,
-      jobId: job.id,
+      transcript: {
+        id: transcriptId,
+        text: transcriptText,
+        segments,
+        source_language: detectedLanguage,
+      },
+      jobId,
     })
 
     return NextResponse.json(previewPayload)
@@ -219,17 +224,15 @@ export async function POST(request: NextRequest) {
 }
 
 async function buildPreviewResponse({
-  admin,
   upload,
   transcript,
   jobId,
 }: {
-  admin: ReturnType<typeof createAdminClient>
   upload: any
   transcript: { id: string; text?: string | null; segments?: unknown; source_language?: string | null }
   jobId: string | null
 }) {
-  const signedUrl = await ensureSignedUploadUrl(admin, upload.storage_path)
+  const signedUrl = getPublicUrl(upload.storage_path)
   const metadata = (upload.metadata as Record<string, unknown> | null) ?? null
   const templateId = typeof metadata?.templateId === "string" ? metadata.templateId : null
   const transcriptLanguage = transcript.source_language ?? (typeof metadata?.language === "string" ? metadata.language : null)
@@ -237,7 +240,7 @@ async function buildPreviewResponse({
   return {
     jobId,
     upload: {
-      id: upload.id,
+      id: upload._id.toString(),
       title: deriveUploadTitle(upload.file_name, metadata),
       fileName: upload.file_name,
       metadata,
@@ -259,26 +262,7 @@ async function buildPreviewResponse({
   }
 }
 
-async function ensureSignedUploadUrl(
-  admin: ReturnType<typeof createAdminClient>,
-  storagePath: string,
-  options?: { attempts?: number; expiresIn?: number },
-) {
-  const attempts = options?.attempts ?? 3
-  const expiresIn = options?.expiresIn ?? 60 * 60 * 4
-  let lastError: string | null = null
-
-  for (let attempt = 0; attempt < attempts; attempt++) {
-    const { data, error } = await admin.storage.from(STORAGE_BUCKETS.uploads).createSignedUrl(storagePath, expiresIn)
-    if (data?.signedUrl) {
-      return data.signedUrl
-    }
-    lastError = error?.message ?? "Unable to sign upload"
-    await new Promise((resolve) => setTimeout(resolve, 300))
-  }
-
-  throw new Error(lastError ?? "Unable to sign upload")
-}
+// Removed ensureSignedUploadUrl - using getPublicUrl from oracle-storage instead
 
 function deriveUploadTitle(fileName: string | null, metadata: Record<string, unknown> | null) {
   if (metadata && typeof metadata.title === "string" && metadata.title.trim().length) {
@@ -367,7 +351,6 @@ function normalizeSegments(
 }
 
 async function resolveTranscriptionSource({
-  admin,
   upload,
   language,
   override,
@@ -375,9 +358,8 @@ async function resolveTranscriptionSource({
   assemblyApiKey,
   assemblyModel,
   jobId,
-  supabase,
+  db,
 }: {
-  admin: ReturnType<typeof createAdminClient>
   upload: any
   language?: string
   override?: z.infer<typeof requestSchema>["override"]
@@ -385,7 +367,7 @@ async function resolveTranscriptionSource({
   assemblyApiKey: string | null
   assemblyModel?: string | null
   jobId: string
-  supabase: Awaited<ReturnType<typeof createClient>>
+  db: Awaited<ReturnType<typeof getDb>>
 }): Promise<
   | {
       segments: CaptionSegment[]
@@ -405,60 +387,61 @@ async function resolveTranscriptionSource({
   }
 
   if (!assemblyApiKey) {
-    await markJobFailed(supabase, jobId, "No transcription provider configured")
+    await markJobFailed(db, jobId, "No transcription provider configured")
     return null
   }
 
-  const { data: signedAsset, error: signedError } = await admin
-    .storage
-    .from(STORAGE_BUCKETS.uploads)
-    .createSignedUrl(upload.storage_path, 60 * 30)
-
-  if (signedError || !signedAsset) {
-    console.error("Failed to sign download URL", signedError)
-    await markJobFailed(supabase, jobId, "Could not fetch uploaded video")
-    return null
-  }
-
-  const videoResponse = await fetch(signedAsset.signedUrl)
-  if (!videoResponse.ok) {
-    await markJobFailed(supabase, jobId, "Supabase storage download failed")
-    return null
-  }
-
-  const videoBuffer = Buffer.from(await videoResponse.arrayBuffer())
-  const fileName = upload.file_name ?? "upload.mp4"
-  const mimeType = upload.mime_type ?? "video/mp4"
-  let transcriptionPayload: TranscriptionPayload | null = null
   try {
-    transcriptionPayload = await transcribeWithAssemblyAI({
-      audioBuffer: videoBuffer,
-      fileName,
-      mimeType,
-      language,
-      assemblyApiKey,
-      model: assemblyModel,
+    // Download video from Oracle storage
+    const videoStream = await downloadFile(upload.storage_path)
+    const chunks: Uint8Array[] = []
+    
+    const reader = videoStream.getReader()
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      chunks.push(value)
+    }
+    
+    const videoBuffer = Buffer.concat(chunks)
+    const fileName = upload.file_name ?? "upload.mp4"
+    const mimeType = upload.mime_type ?? "video/mp4"
+    
+    let transcriptionPayload: TranscriptionPayload | null = null
+    try {
+      transcriptionPayload = await transcribeWithAssemblyAI({
+        audioBuffer: videoBuffer,
+        fileName,
+        mimeType,
+        language,
+        assemblyApiKey,
+        model: assemblyModel,
+      })
+    } catch (error) {
+      console.error("AssemblyAI transcription failure", error)
+      await markJobFailed(
+        db,
+        jobId,
+        error instanceof Error ? error.message : "AssemblyAI transcription failed",
+      )
+      return null
+    }
+
+    if (!transcriptionPayload) {
+      await markJobFailed(db, jobId, "Transcription provider failed")
+      return null
+    }
+
+    return buildTranscriptionResponse({
+      payload: transcriptionPayload,
+      fallbackLanguage: language,
+      model: transcriptionPayload.model ?? assemblyModel ?? "assemblyai",
     })
   } catch (error) {
-    console.error("AssemblyAI transcription failure", error)
-    await markJobFailed(
-      supabase,
-      jobId,
-      error instanceof Error ? error.message : "AssemblyAI transcription failed",
-    )
+    console.error("Failed to download video from Oracle storage", error)
+    await markJobFailed(db, jobId, "Could not fetch uploaded video")
     return null
   }
-
-  if (!transcriptionPayload) {
-    await markJobFailed(supabase, jobId, "Transcription provider failed")
-    return null
-  }
-
-  return buildTranscriptionResponse({
-    payload: transcriptionPayload,
-    fallbackLanguage: language,
-    model: transcriptionPayload.model ?? assemblyModel ?? "assemblyai",
-  })
 }
 
 function buildOverrideTranscription(override: NonNullable<z.infer<typeof requestSchema>["override"]>) {
@@ -812,14 +795,20 @@ function mockTranscription(fileName: string) {
 }
 
 async function markJobFailed(
-  supabase: Awaited<ReturnType<typeof createClient>>,
+  db: Awaited<ReturnType<typeof getDb>>,
   jobId: string,
   errorMessage: string,
 ) {
-  await supabase
-    .from("jobs")
-    .update({ status: "failed", error: errorMessage, completed_at: new Date().toISOString() })
-    .eq("id", jobId)
+  await db.collection("jobs").updateOne(
+    { _id: new ObjectId(jobId) },
+    { 
+      $set: { 
+        status: "failed", 
+        error: errorMessage, 
+        completed_at: new Date() 
+      } 
+    }
+  )
 }
 
 class OverridePayloadError extends Error {

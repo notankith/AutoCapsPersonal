@@ -1,32 +1,27 @@
 import { redirect } from "next/navigation"
-import { createClient } from "@/lib/supabase/server"
+import { getDb } from "@/lib/mongodb"
+import { ObjectId } from "mongodb"
 import { PostUploadWorkspace } from "@/components/editor/post-upload-workspace"
 
 export default async function WorkspacePage({ params }: { params: Promise<{ id: string }> }) {
   const resolvedParams = await params
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  // TODO: Get user from session/JWT token
+  const userId = "default-user" // Temporary until auth is implemented
 
-  if (!user) {
-    redirect("/auth/login")
-  }
+  const db = await getDb()
+  
+  const upload = await db.collection("uploads").findOne({
+    _id: new ObjectId(resolvedParams.id),
+    user_id: userId
+  })
 
-  const { data: upload, error: uploadError } = await supabase
-    .from("uploads")
-    .select("id")
-    .eq("id", resolvedParams.id)
-    .eq("user_id", user.id)
-    .single()
-
-  if (uploadError || !upload) {
+  if (!upload) {
     redirect("/dashboard")
   }
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-background via-card to-background px-4 py-10 md:px-10">
-      <PostUploadWorkspace uploadId={upload.id} />
+      <PostUploadWorkspace uploadId={upload._id.toString()} />
     </div>
   )
 }

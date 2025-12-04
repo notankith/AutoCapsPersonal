@@ -1,5 +1,8 @@
-import { createBrowserClient } from "@supabase/ssr"
+/**
+ * Supabase stub - Replaced with MongoDB + Oracle Object Storage
+ * This file prevents import errors during migration
+ */
 
 export function createClient() {
-  return createBrowserClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!)
+  throw new Error("Supabase has been replaced with MongoDB. Use fetch() for API calls instead.")
 }

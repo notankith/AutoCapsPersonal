@@ -1,16 +1,14 @@
 import { type NextRequest, NextResponse } from "next/server"
-import { createClient } from "@/lib/supabase/server"
+import { getDb } from "@/lib/mongodb"
+import { deleteFile } from "@/lib/oracle-storage"
+import { ObjectId } from "mongodb"
 
 export async function DELETE(request: NextRequest) {
   try {
-    const supabase = await createClient()
-    const {
-      data: { user },
-    } = await supabase.auth.getUser()
-
-    if (!user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
-    }
+    const db = await getDb()
+    
+    // TODO: Get userId from JWT token instead of hardcoding
+    const userId = "default-user"
 
     const { videoId } = await request.json()
 
@@ -18,43 +16,36 @@ export async function DELETE(request: NextRequest) {
       return NextResponse.json({ error: "Video ID is required" }, { status: 400 })
     }
 
-    // Get video to verify ownership and get file path
-    const { data: video, error: videoError } = await supabase
-      .from("videos")
-      .select("*")
-      .eq("id", videoId)
-      .eq("user_id", user.id)
-      .single()
+    // Get upload to verify ownership and get file path
+    let upload
+    try {
+      upload = await db.collection("uploads").findOne({
+        _id: new ObjectId(videoId),
+        user_id: userId,
+      })
+    } catch (error) {
+      return NextResponse.json({ error: "Invalid video ID format" }, { status: 400 })
+    }
 
-    if (videoError || !video) {
+    if (!upload) {
       return NextResponse.json({ error: "Video not found" }, { status: 404 })
     }
 
-    // Extract file path from URL
-    const filePath = `videos/${user.id}/${video.original_file_url.split("/").pop()}`
-
     // Delete from storage
-    const { error: deleteError } = await supabase.storage.from("videos").remove([filePath])
-
-    if (deleteError) {
+    try {
+      await deleteFile(upload.storage_path)
+    } catch (deleteError) {
       console.error("[v0] Storage deletion error:", deleteError)
-      return NextResponse.json({ error: "Failed to delete file" }, { status: 500 })
+      // Continue even if storage deletion fails
     }
 
     // Delete from database
-    const { error: dbError } = await supabase.from("videos").delete().eq("id", videoId)
+    await db.collection("uploads").deleteOne({ _id: upload._id })
 
-    if (dbError) {
-      console.error("[v0] Database deletion error:", dbError)
-      return NextResponse.json({ error: "Failed to delete video record" }, { status: 500 })
-    }
-
-    // Clean up associated processing jobs
-    const { error: jobError } = await supabase.from("processing_jobs").delete().eq("video_id", videoId)
-
-    if (jobError) {
-      console.error("[v0] Job deletion error:", jobError)
-    }
+    // Clean up associated transcripts, translations, and jobs
+    await db.collection("transcripts").deleteMany({ upload_id: videoId })
+    await db.collection("translations").deleteMany({ upload_id: videoId })
+    await db.collection("jobs").deleteMany({ upload_id: videoId })
 
     return NextResponse.json({
       success: true,

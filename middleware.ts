@@ -1,8 +1,12 @@
-import { updateSession } from "@/lib/supabase/middleware"
-import type { NextRequest } from "next/server"
+import { NextResponse, type NextRequest } from "next/server"
 
+/**
+ * Middleware - Auth removed (Supabase replaced with MongoDB)
+ * Add your own auth logic here if needed
+ */
 export async function middleware(request: NextRequest) {
-  return await updateSession(request)
+  // Temporarily allow all requests - implement your own auth logic
+  return NextResponse.next({ request })
 }
 
 export const config = {

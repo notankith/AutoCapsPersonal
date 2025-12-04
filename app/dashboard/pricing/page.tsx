@@ -1,20 +1,18 @@
-import { createClient } from "@/lib/supabase/server"
+import { getDb } from "@/lib/mongodb"
 import { PricingPlans } from "@/components/pricing/pricing-plans"
 import { PricingFeatures } from "@/components/pricing/pricing-features"
 
 export default async function PricingPage() {
-  const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  // TODO: Get user from session/JWT token
+  const userId = "default-user" // Temporary until auth is implemented
 
+  const db = await getDb()
+  
   // Fetch user's current subscription
-  const { data: subscription } = await supabase
-    .from("subscriptions")
-    .select("*")
-    .eq("user_id", user?.id)
-    .eq("status", "active")
-    .single()
+  const subscription = await db.collection("subscriptions").findOne({ 
+    user_id: userId,
+    status: "active" 
+  })
 
   return (
     <div className="p-8 space-y-12">

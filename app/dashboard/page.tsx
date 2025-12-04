@@ -1,15 +1,13 @@
 "use client"
 
 import type React from "react"
-import { useMemo, useState } from "react"
+import { useState } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Upload, AlertCircle, Loader, CheckCircle, FileText } from "lucide-react"
 import { useRouter } from "next/navigation"
-import { createClient as createSupabaseClient } from "@/lib/supabase/client"
 
 export default function DashboardPage() {
-  const supabase = useMemo(() => createSupabaseClient(), [])
   const [file, setFile] = useState<File | null>(null)
   const [title, setTitle] = useState("")
   const [hasTranscript, setHasTranscript] = useState(false)
@@ -79,21 +77,11 @@ export default function DashboardPage() {
         hasTranscript,
         transcript: hasTranscript ? transcriptText : undefined,
       })
-      setStatusMessage("Uploading to Supabase Storage...")
-      const {
-        data: { session },
-      } = await supabase.auth.getSession()
-      if (!session?.access_token) {
-        throw new Error("You must be signed in to upload files")
-      }
+      setStatusMessage("Uploading to Oracle Object Storage...")
       await uploadFileWithProgress(
         prepared,
         file,
         (progress) => setUploadProgress(Math.min(progress, 99)),
-        {
-          authorization: `Bearer ${session.access_token}`,
-          apikey: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
-        },
       )
 
       if (!hasTranscript) {
@@ -326,60 +314,38 @@ async function prepareSignedUpload(file: File, metadata: Record<string, unknown>
   return data
 }
 
-type StorageAuthHeaders = {
-  authorization?: string
-  apikey?: string
-}
-
 /**
- * IMPORTANT:
- * Supabase signed upload URLs expect a PUT with the raw file bytes (not FormData).
- * We use XMLHttpRequest here to get upload progress events reliably across browsers.
+ * Oracle Object Storage upload with progress tracking.
+ * Uses PUT with raw file bytes (not FormData).
  */
 async function uploadFileWithProgress(
   payload: UploadPreparation,
   file: File,
   onProgress: (progress: number) => void,
-  authHeaders?: StorageAuthHeaders,
 ) {
   await new Promise<void>((resolve, reject) => {
     const xhr = new XMLHttpRequest()
-    // Use PUT for signed upload URL
     xhr.open("PUT", payload.uploadUrl)
-
-    // Required headers for signed upload: content-type and optional upsert
     xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream")
-    xhr.setRequestHeader("x-upsert", "true")
-
-    // If you are also sending temporary auth headers (not necessary for signed URL),
-    // keep them. Usually signedUrl alone is sufficient.
-    if (authHeaders?.authorization) {
-      xhr.setRequestHeader("Authorization", authHeaders.authorization)
-    }
-    if (authHeaders?.apikey) {
-      xhr.setRequestHeader("apikey", authHeaders.apikey)
-    }
 
     xhr.upload.onprogress = (event) => {
       if (!event.lengthComputable) return
       onProgress(Math.round((event.loaded / event.total) * 100))
     }
-    xhr.onerror = () => reject(new Error("Network error while uploading to storage"))
+    xhr.onerror = () => reject(new Error("Network error while uploading to Oracle storage"))
     xhr.onload = () => {
-      // Supabase signed PUTs return 200 or 201 on success
       if (xhr.status >= 200 && xhr.status < 300) {
         resolve()
       } else {
-        // include server response text for debugging
         reject(
           new Error(
-            `Storage upload failed (${xhr.status}) - ${xhr.responseText || "No response body"}. Check bucket permissions and signed URL validity.`,
+            `Oracle storage upload failed (${xhr.status}) - ${xhr.responseText || "No response body"}`,
           ),
         )
       }
     }
 
-    // Send raw file bytes directly (not FormData)
+    // Send raw file bytes directly
     xhr.send(file)
   })
 }

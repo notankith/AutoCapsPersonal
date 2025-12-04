@@ -1,5 +1,5 @@
 import { createAdminClient } from "@/lib/supabase/admin"
-import { RETENTION_WINDOW_DAYS, STORAGE_BUCKETS } from "@/lib/pipeline"
+import { RETENTION_WINDOW_DAYS, STORAGE_PREFIX } from "@/lib/pipeline"
 import { type NextRequest, NextResponse } from "next/server"
 
 export async function POST(request: NextRequest) {

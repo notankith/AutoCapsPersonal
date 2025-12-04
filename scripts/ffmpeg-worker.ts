@@ -4,8 +4,8 @@ import { tmpdir } from "node:os"
 import { join, dirname } from "node:path"
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
 import jwt from "jsonwebtoken"
-import { createClient, type PostgrestError } from "@supabase/supabase-js"
-import { STORAGE_BUCKETS, RENDER_RESOLUTIONS, type CaptionTemplate, type RenderOverlay } from "@/lib/pipeline"
+import { MongoClient, ObjectId, type Db } from "mongodb"
+import { STORAGE_PREFIX, RENDER_RESOLUTIONS, type CaptionTemplate, type RenderOverlay } from "@/lib/pipeline"
 import "dotenv/config"
 
 // FINAL AND ONLY FFmpeg BINARY
@@ -28,17 +28,61 @@ type RenderJobPayload = {
 }
 
 const WORKER_SECRET = process.env.WORKER_JWT_SECRET
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL
-const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY
+const MONGODB_URI = process.env.MONGODB_URI
+const MONGODB_DB_NAME = process.env.MONGODB_DB_NAME || "autocaps"
+const ORACLE_PAR_URL = process.env.ORACLE_PAR_URL
 const PORT = Number(process.env.FFMPEG_WORKER_PORT ?? 8787)
 
-if (!WORKER_SECRET || !SUPABASE_URL || !SERVICE_ROLE_KEY) {
-  throw new Error("Missing WORKER_JWT_SECRET, SUPABASE credentials")
+if (!WORKER_SECRET || !MONGODB_URI || !ORACLE_PAR_URL) {
+  throw new Error("Missing WORKER_JWT_SECRET, MONGODB_URI, or ORACLE_PAR_URL")
 }
 
-const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
-  auth: { autoRefreshToken: false, persistSession: false },
-})
+// MongoDB connection
+let mongoClient: MongoClient
+let db: Db
+let isConnecting = false
+
+async function connectMongo() {
+  if (db) {
+    console.log("[worker] MongoDB already connected")
+    return db
+  }
+
+  if (isConnecting) {
+    console.log("[worker] MongoDB connection in progress, waiting...")
+    while (isConnecting && !db) {
+      await new Promise(resolve => setTimeout(resolve, 100))
+    }
+    if (db) return db
+  }
+
+  isConnecting = true
+  try {
+    console.log("[worker] Connecting to MongoDB...")
+    mongoClient = new MongoClient(MONGODB_URI!)
+    await mongoClient.connect()
+    db = mongoClient.db(MONGODB_DB_NAME)
+    
+    // Test connection
+    await db.admin().ping()
+    console.log("[worker] Connected to MongoDB database:", MONGODB_DB_NAME)
+    
+    return db
+  } catch (err) {
+    console.error("[worker] MongoDB connection failed:", err)
+    throw err
+  } finally {
+    isConnecting = false
+  }
+}
+
+// Initialize MongoDB connection on startup
+connectMongo()
+  .then(() => console.log("[worker] MongoDB initialized successfully"))
+  .catch(err => {
+    console.error("[worker] Failed to initialize MongoDB:", err)
+    process.exit(1)
+  })
 
 createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`)
@@ -71,6 +115,10 @@ createServer(async (req, res) => {
   const body = await readBody(req)
   try {
     const payload = JSON.parse(body) as RenderJobPayload
+    
+    // Ensure MongoDB is connected before processing
+    await connectMongo()
+    
     await processJob(payload)
     res.writeHead(202).end(JSON.stringify({ accepted: true, jobId: payload.jobId }))
   } catch (error) {
@@ -109,7 +157,7 @@ async function processJob(payload: RenderJobPayload) {
 
   await updateJob(jobId, {
     status: "processing",
-    started_at: new Date().toISOString(),
+    started_at: new Date(),
   })
 
   const videoTmp = join(tmpdir(), `${jobId}-video`)
@@ -120,13 +168,11 @@ async function processJob(payload: RenderJobPayload) {
   let fontsDir: string | undefined;
 
   try {
-    console.log("=== Getting Signed URLs ===")
-    console.log("Uploads bucket:", STORAGE_BUCKETS.uploads)
-    console.log("Captions bucket:", STORAGE_BUCKETS.captions)
+    console.log("=== Getting Oracle Storage URLs ===")
 
     const [videoUrl, captionUrl] = await Promise.all([
-      ensureSignedUrl(payload.videoUrl, STORAGE_BUCKETS.uploads, payload.videoPath),
-      ensureSignedUrl(payload.captionUrl, STORAGE_BUCKETS.captions, payload.captionPath),
+      ensureSignedUrl(payload.videoUrl, "uploads", payload.videoPath),
+      ensureSignedUrl(payload.captionUrl, "captions", payload.captionPath),
     ])
 
     console.log("Signed video URL:", videoUrl)
@@ -230,51 +276,50 @@ async function processJob(payload: RenderJobPayload) {
     )
 
     const file = await fs.readFile(outputTmp)
-    console.log("[worker] Uploading render to Storage", {
+    console.log("[worker] Uploading render to Oracle Storage", {
       jobId,
-      bucket: STORAGE_BUCKETS.renders,
       path: payload.outputPath,
       bytes: file.length,
     })
-    const { error: renderUploadError } = await supabase.storage
-      .from(STORAGE_BUCKETS.renders)
-      .upload(payload.outputPath, file, {
-        upsert: true,
-        contentType: "video/mp4",
-      })
+    
+    // Upload to Oracle Object Storage
+    const uploadUrl = getOracleStorageUrl(payload.outputPath)
+    const uploadResponse = await fetch(uploadUrl, {
+      method: "PUT",
+      body: new Uint8Array(file),
+      headers: {
+        "Content-Type": "video/mp4",
+        "Content-Length": String(file.length),
+      },
+    })
 
-    if (renderUploadError) {
-      console.error("[worker] Render upload failed", renderUploadError)
-      throw new Error(`Render upload failed: ${renderUploadError.message}`)
+    if (!uploadResponse.ok) {
+      const errorText = await uploadResponse.text()
+      console.error("[worker] Render upload failed", errorText)
+      throw new Error(`Render upload failed: ${uploadResponse.status} - ${errorText}`)
     }
 
-    const { data: signed } = await supabase
-      .storage
-      .from(STORAGE_BUCKETS.renders)
-      .createSignedUrl(payload.outputPath, 86400)
+    const downloadUrl = getOracleStorageUrl(payload.outputPath)
 
     console.log("[worker] Upload complete, updating job", { jobId })
     commitJobResultState({
       progress: 1,
-      downloadUrl: signed?.signedUrl,
+      downloadUrl,
       storagePath: payload.outputPath,
     })
 
     await updateJob(jobId, {
       status: "done",
-      completed_at: new Date().toISOString(),
+      completed_at: new Date(),
       result: { ...jobResultState },
     })
 
-    const { missingRenderColumn } = await updateUploadRenderState(payload.uploadId, {
+    await updateUploadRenderState(payload.uploadId, {
       status: "rendered",
       render_asset_path: payload.outputPath,
-      updated_at: new Date().toISOString(),
+      updated_at: new Date(),
     })
 
-    if (missingRenderColumn) {
-      console.warn("[worker] uploads.render_asset_path column missing; render path stored only in job result")
-    }
     console.log("[worker] Job completed", { jobId })
 
   } catch (err) {
@@ -282,14 +327,14 @@ async function processJob(payload: RenderJobPayload) {
     await updateJob(jobId, {
       status: "failed",
       error: (err as Error).message,
-      completed_at: new Date().toISOString(),
+      completed_at: new Date(),
       result: { ...jobResultState },
     })
 
-    await supabase.from("uploads").update({
-      status: "render_failed",
-      updated_at: new Date().toISOString(),
-    }).eq("id", payload.uploadId)
+    await db.collection("uploads").updateOne(
+      { _id: new ObjectId(payload.uploadId) },
+      { $set: { status: "render_failed", updated_at: new Date() } }
+    )
 
     throw err
   } finally {
@@ -314,14 +359,18 @@ async function processJob(payload: RenderJobPayload) {
 }
 
 async function updateJob(jobId: string, patch: Record<string, any>) {
-  const { error } = await supabase
-    .from("jobs")
-    .update(patch)
-    .eq("id", jobId)
-
-  if (error) {
+  try {
+    const result = await db.collection("jobs").updateOne(
+      { _id: new ObjectId(jobId) },
+      { $set: patch }
+    )
+    console.log("[worker] Job updated", { jobId, patch, matchedCount: result.matchedCount, modifiedCount: result.modifiedCount })
+    if (result.matchedCount === 0) {
+      console.warn("[worker] Job not found in database", { jobId })
+    }
+  } catch (error) {
     console.error("[worker] Job update failed", { jobId, patch, error })
-    throw new Error(`Job update failed: ${error.message}`)
+    throw new Error(`Job update failed: ${error instanceof Error ? error.message : String(error)}`)
   }
 }
 
@@ -329,34 +378,23 @@ async function updateUploadRenderState(
   uploadId: string,
   patch: Record<string, any>,
 ): Promise<{ missingRenderColumn: boolean }> {
-  const attemptedPatch = { ...patch }
-  const { error } = await supabase.from("uploads").update(attemptedPatch).eq("id", uploadId)
-
-  if (!error) return { missingRenderColumn: false }
-
-  const isMissingColumn = isMissingRenderColumnError(error)
-  if (!isMissingColumn) {
+  try {
+    const result = await db.collection("uploads").updateOne(
+      { _id: new ObjectId(uploadId) },
+      { $set: patch }
+    )
+    console.log("[worker] Upload updated", { uploadId, patch, matchedCount: result.matchedCount, modifiedCount: result.modifiedCount })
+    if (result.matchedCount === 0) {
+      console.warn("[worker] Upload not found in database", { uploadId })
+    }
+    return { missingRenderColumn: false }
+  } catch (error) {
     console.error("[worker] Failed to update upload row", error)
-    throw new Error(`Failed to update upload row: ${error.message}`)
+    throw new Error(`Failed to update upload row: ${error instanceof Error ? error.message : String(error)}`)
   }
-
-  console.warn("[worker] uploads.render_asset_path missing in schema cache; retrying without column")
-  const { render_asset_path: _ignored, ...fallbackPatch } = attemptedPatch
-  const { error: fallbackError } = await supabase.from("uploads").update(fallbackPatch).eq("id", uploadId)
-
-  if (fallbackError) {
-    console.error("[worker] Upload update fallback failed", fallbackError)
-    throw new Error(`Failed to update upload row (fallback): ${fallbackError.message}`)
-  }
-
-  return { missingRenderColumn: true }
 }
 
-function isMissingRenderColumnError(error: PostgrestError | null): boolean {
-  if (!error) return false
-  if (error.code !== "PGRST204") return false
-  return /render_asset_path/.test(error.message || "")
-}
+// Removed isMissingRenderColumnError - no longer needed with MongoDB
 
 function resolveResolutionKey(res: string | undefined): keyof typeof RENDER_RESOLUTIONS | null {
   if (!res) return null
@@ -555,17 +593,17 @@ function escapeFilterPath(path: string) {
   return path.replace(/\\/g, "/").replace(/:/g, "\\:").replace(/ /g, "\\ ")
 }
 
-// Retrieve a signed URL for a storage object if one is not already provided
-async function ensureSignedUrl(url: string | undefined, bucket: string, path: string) {
+// Retrieve Oracle storage URL
+function getOracleStorageUrl(path: string): string {
+  if (!ORACLE_PAR_URL) throw new Error("ORACLE_PAR_URL not configured")
+  // Remove leading slash if present
+  const cleanPath = path.startsWith('/') ? path.slice(1) : path
+  return `${ORACLE_PAR_URL}${cleanPath}`
+}
+
+async function ensureSignedUrl(url: string | undefined, _bucket: string, path: string) {
   if (url) return url
   if (!path) throw new Error("Missing storage path")
-
-  const { data, error } = await supabase.storage.from(bucket).createSignedUrl(path, 60 * 60 * 4)
-  if (data?.signedUrl) return data.signedUrl
-
-  const pub = supabase.storage.from(bucket).getPublicUrl(path)
-  if (pub.data?.publicUrl) return pub.data.publicUrl
-
-  throw new Error(`Unable to sign asset: ${path} (${error?.message ?? "unknown"})`)
+  return getOracleStorageUrl(path)
 }
 

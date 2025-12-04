@@ -1,9 +1,10 @@
 import { z } from "zod"
 
-export const STORAGE_BUCKETS = {
-  uploads: process.env.SUPABASE_UPLOADS_BUCKET ?? "uploads",
-  captions: process.env.SUPABASE_CAPTIONS_BUCKET ?? "captions",
-  renders: process.env.SUPABASE_RENDERS_BUCKET ?? "renders",
+// All files now stored in single Oracle bucket via PAR URL
+export const STORAGE_PREFIX = {
+  uploads: "uploads",
+  captions: "captions",
+  renders: "renders",
 } as const
 
 const retentionEnv = Number(process.env.FILE_RETENTION_DAYS ?? "")
@@ -71,11 +72,11 @@ export type TranscriptPayload = {
 }
 
 export const captionRequestSchema = z.object({
-  uploadId: z.string().uuid(),
+  uploadId: z.string().min(1),
   template: z.enum(CAPTION_TEMPLATES),
   resolution: z.enum(RESOLUTION_OPTIONS),
-  transcriptId: z.string().uuid().optional(),
-  translationId: z.string().uuid().optional(),
+  transcriptId: z.string().min(1).optional(),
+  translationId: z.string().min(1).optional(),
   segments: z.array(captionSegmentPayloadSchema).optional(),
   customStyles: z.object({
     fontSize: z.number().optional(),

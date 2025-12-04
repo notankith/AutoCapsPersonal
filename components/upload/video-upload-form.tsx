@@ -11,9 +11,10 @@ import { useRouter } from "next/navigation"
 type UploadPreparation = {
   uploadId: string
   uploadUrl: string
-  token: string
   path: string
-  bucket: string
+  // Optional fields (backward compatibility)
+  token?: string
+  bucket?: string
 }
 
 type TranscriptionResult = {
@@ -76,7 +77,7 @@ export function VideoUploadForm({ onComplete }: VideoUploadFormProps = {}) {
 
     try {
       const prepared = await prepareSignedUpload(file, title, description)
-      setStatusMessage("Uploading to Supabase Storage...")
+      setStatusMessage("Uploading to Oracle Object Storage...")
       await uploadFileWithProgress(
         prepared,
         file,
@@ -268,8 +269,9 @@ async function prepareSignedUpload(file: File, title: string, description: strin
 async function uploadFileWithProgress(payload: UploadPreparation, file: File, onProgress: (progress: number) => void) {
   await new Promise<void>((resolve, reject) => {
     const xhr = new XMLHttpRequest()
-    xhr.open("POST", payload.uploadUrl)
-    xhr.setRequestHeader("x-upsert", "false")
+    // Oracle Object Storage uses PUT with raw file body
+    xhr.open("PUT", payload.uploadUrl)
+    xhr.setRequestHeader("Content-Type", file.type)
 
     xhr.upload.onprogress = (event) => {
       if (!event.lengthComputable) return
@@ -277,20 +279,18 @@ async function uploadFileWithProgress(payload: UploadPreparation, file: File, on
       onProgress(percent)
     }
 
-    xhr.onerror = () => reject(new Error("Network error while uploading to storage"))
+    xhr.onerror = () => reject(new Error("Network error while uploading to Oracle storage"))
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) {
         onProgress(100)
         resolve()
       } else {
-        reject(new Error(`Storage upload failed (${xhr.status}) - ${xhr.responseText || "No response body"}`))
+        reject(new Error(`Oracle storage upload failed (${xhr.status}) - ${xhr.responseText || "No response body"}`))
       }
     }
 
-    const formData = new FormData()
-    formData.append("cacheControl", "3600")
-    formData.append("file", file)
-    xhr.send(formData)
+    // Send raw file (not FormData) for Oracle Object Storage
+    xhr.send(file)
   })
 }
 
