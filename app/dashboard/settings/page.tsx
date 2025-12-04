@@ -1,6 +1,8 @@
 import { getDb } from "@/lib/mongodb"
 import { SettingsTabs } from "@/components/settings/settings-tabs"
 
+export const dynamic = "force-dynamic"
+
 export default async function SettingsPage() {
   // TODO: Get user from session/JWT token
   const userId = "default-user" // Temporary until auth is implemented
@@ -8,12 +10,12 @@ export default async function SettingsPage() {
   const db = await getDb()
   
   // Fetch user profile and subscription
-  const user = await db.collection("users").findOne({ _id: userId as any })
-  const profile = await db.collection("profiles").findOne({ user_id: userId })
+  const user = await db.collection("users").findOne({ _id: userId as any }).catch(() => null)
+  const profile = await db.collection("profiles").findOne({ user_id: userId }).catch(() => null)
   const subscription = await db.collection("subscriptions").findOne({ 
     user_id: userId,
     status: "active" 
-  })
+  }).catch(() => null)
 
   return (
     <div className="p-8 space-y-6 max-w-4xl">

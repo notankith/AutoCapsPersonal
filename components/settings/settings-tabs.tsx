@@ -35,7 +35,7 @@ export function SettingsTabs({ user, profile, subscription }: SettingsTabsProps)
       </TabsList>
 
       <TabsContent value="profile" className="mt-6">
-        <ProfileSettings profile={profile} userEmail={user.email} />
+        <ProfileSettings profile={profile} userEmail={user?.email} />
       </TabsContent>
 
       <TabsContent value="notifications" className="mt-6">
@@ -43,7 +43,7 @@ export function SettingsTabs({ user, profile, subscription }: SettingsTabsProps)
       </TabsContent>
 
       <TabsContent value="security" className="mt-6">
-        <SecuritySettings userEmail={user.email} />
+        <SecuritySettings userEmail={user?.email} />
       </TabsContent>
 
       <TabsContent value="billing" className="mt-6">
