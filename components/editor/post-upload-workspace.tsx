@@ -540,61 +540,103 @@ export function PostUploadWorkspace({ uploadId }: PostUploadWorkspaceProps) {
     if (!jobId) return
 
     let stop = false
-    let pollTimer: any = null
+    const eventSource = new EventSource(`/api/jobs/${jobId}/stream`)
 
-    const poll = async () => {
+    eventSource.addEventListener("message", (event) => {
       if (stop) return
       try {
-        const resp = await fetch(`/api/jobs/${jobId}`)
-        if (!resp.ok) throw new Error("Unable to fetch job status")
-
-        const payload = await resp.json()
-        const status = payload.job.status
+        const data = JSON.parse(event.data)
+        const status = data.status
 
         setJobStatus(status)
-        const progressValue = normalizeJobProgressValue(payload.job.result?.progress)
+        const progressValue = normalizeJobProgressValue(data.progress)
         if (progressValue !== null) {
           setJobProgress(progressValue)
         }
 
         if (status === "done") {
-          clearInterval(pollTimer)
+          eventSource.close()
           setJobProgress(1)
 
-          const direct = payload.job.result?.downloadUrl ?? null
-          if (direct) {
-            setDownloadUrl(direct)
-          } else {
-            try {
-              const url = await fetchRenderDownload()
-              if (!stop) setDownloadUrl(url)
-            } catch (err) {
-              if (!stop) setJobMessage("Unable to fetch download link")
-            }
-          }
-
-          setJobMessage("Render complete.")
+          // Fetch the full job details to get the download URL
+          fetch(`/api/jobs/${jobId}`)
+            .then(r => r.json())
+            .then(payload => {
+              if (stop) return
+              const direct = payload.job.result?.downloadUrl ?? null
+              if (direct) {
+                setDownloadUrl(direct)
+              } else {
+                fetchRenderDownload()
+                  .then(url => {
+                    if (!stop) setDownloadUrl(url)
+                  })
+                  .catch(err => {
+                    if (!stop) setJobMessage("Unable to fetch download link")
+                  })
+              }
+              setJobMessage("Render complete.")
+            })
+            .catch(() => {
+              if (!stop) setJobMessage("Unable to fetch render details.")
+            })
         }
 
         if (status === "failed") {
-          clearInterval(pollTimer)
-          setJobMessage(payload.job.error ?? "Render failed.")
-          setDownloadUrl(null)
-          setJobProgress(null)
+          eventSource.close()
+          fetch(`/api/jobs/${jobId}`)
+            .then(r => r.json())
+            .then(payload => {
+              if (!stop) {
+                setJobMessage(payload.job.error ?? "Render failed.")
+                setDownloadUrl(null)
+                setJobProgress(null)
+              }
+            })
+            .catch(() => {
+              if (!stop) setJobMessage("Render failed.")
+            })
         }
       } catch (err) {
-        if (!stop) {
-          setJobMessage(err instanceof Error ? err.message : "Polling error")
-        }
+        console.error("Failed to parse SSE message", err)
       }
-    }
+    })
 
-    pollTimer = setInterval(poll, 2500)
-    poll()
+    eventSource.addEventListener("error", (err) => {
+      if (!stop) {
+        console.error("SSE connection error", err)
+        eventSource.close()
+        setJobMessage("Connection lost. Retrying...")
+        
+        // Fallback to polling if SSE fails
+        const pollTimer = setInterval(async () => {
+          if (stop) {
+            clearInterval(pollTimer)
+            return
+          }
+          try {
+            const resp = await fetch(`/api/jobs/${jobId}`)
+            if (!resp.ok) return
+            const payload = await resp.json()
+            const status = payload.job.status
+            setJobStatus(status)
+            const progressValue = normalizeJobProgressValue(payload.job.result?.progress)
+            if (progressValue !== null) {
+              setJobProgress(progressValue)
+            }
+            if (status === "done" || status === "failed") {
+              clearInterval(pollTimer)
+            }
+          } catch (err) {
+            console.error("Fallback poll error", err)
+          }
+        }, 1000)
+      }
+    })
 
     return () => {
       stop = true
-      if (pollTimer) clearInterval(pollTimer)
+      eventSource.close()
     }
   }, [jobId, fetchRenderDownload])
 

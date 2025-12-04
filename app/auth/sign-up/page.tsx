@@ -40,7 +40,7 @@ export default function SignUpPage() {
       const data = await response.json()
       if (!response.ok) throw new Error(data.error || "Sign up failed")
 
-      router.push("/auth/verify-email")
+      router.push("/auth/login")
     } catch (err) {
       setError(err instanceof Error ? err.message : "An error occurred")
     } finally {

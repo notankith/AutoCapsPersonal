@@ -252,7 +252,8 @@ async function processJob(payload: RenderJobPayload) {
 
       const ratio = Math.max(0, Math.min(1, timestampSeconds / videoDuration))
       const now = Date.now()
-      if (ratio - lastProgressRatio < 0.01 && now - lastProgressPersist < 1200) {
+      // Update more frequently: 0.5% change or 300ms elapsed
+      if (ratio - lastProgressRatio < 0.005 && now - lastProgressPersist < 300) {
         return
       }
       lastProgressRatio = ratio
