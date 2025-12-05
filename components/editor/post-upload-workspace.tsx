@@ -83,6 +83,7 @@ type PreviewSession = {
     title: string
     templateId: string | null
     language: string | null
+    lastRenderedUrl?: string | null
   }
   video: {
     url: string | null
@@ -216,6 +217,12 @@ export function PostUploadWorkspace({ uploadId }: PostUploadWorkspaceProps) {
         setCaptionSegments(templatedSegments)
         setTranscriptId(payload?.transcript?.id ?? null)
         setSelectedTemplate(resolvedTemplate.id)
+
+        if (payload?.upload?.lastRenderedUrl) {
+          setDownloadUrl(payload.upload.lastRenderedUrl)
+          setJobStatus("done")
+          setJobMessage("Previous render available")
+        }
       } catch (err) {
         if (controller.signal.aborted) return
         setPreviewError(err instanceof Error ? err.message : "Failed to initialize preview")

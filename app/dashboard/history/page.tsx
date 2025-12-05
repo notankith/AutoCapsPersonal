@@ -5,6 +5,8 @@ import { Input } from "@/components/ui/input"
 import { Edit3, Trash2, Search } from "lucide-react"
 import Link from "next/link"
 import { FileText } from "lucide-react"
+import { DeleteHistoryButton } from "@/components/dashboard/history/delete-history-button"
+import { getCurrentUser } from "@/lib/auth"
 
 interface UploadHistoryEntry {
   id: string
@@ -17,8 +19,8 @@ interface UploadHistoryEntry {
 }
 
 export default async function HistoryPage() {
-  // TODO: Get user from session/JWT token
-  const userId = "default-user" // Temporary until auth is implemented
+  const user = await getCurrentUser()
+  const userId = user?.userId || "default-user"
 
   const db = await getDb()
   
@@ -84,9 +86,12 @@ export default async function HistoryPage() {
   return (
     <div className="p-8 max-w-7xl mx-auto">
       <div className="mb-8 space-y-4">
-        <div>
-          <h1 className="text-3xl font-bold mb-2">Video History</h1>
-          <p className="text-muted-foreground">All your uploaded and processed videos</p>
+        <div className="flex justify-between items-start">
+          <div>
+            <h1 className="text-3xl font-bold mb-2">Video History</h1>
+            <p className="text-muted-foreground">All your uploaded and processed videos</p>
+          </div>
+          {uploads.length > 0 && <DeleteHistoryButton />}
         </div>
         <div className="relative max-w-md">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />

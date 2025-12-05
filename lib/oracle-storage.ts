@@ -94,18 +94,8 @@ export async function downloadFile(filename: string): Promise<ReadableStream> {
 }
 
 /**
- * Get a signed URL for a file (in Oracle's case, just returns the PAR URL + filename)
- * @param filename - The filename
- * @returns The public URL
- */
-export function getPublicUrl(filename: string): string {
-  return `${ORACLE_PAR_URL}${filename}`
-}
-
-/**
  * Delete a file from Oracle Object Storage
- * Note: PAR URLs might not support DELETE. This is a placeholder.
- * If deletion is needed, you'll need to configure your PAR with DELETE permissions.
+ * @param filename - The filename to delete
  */
 export async function deleteFile(filename: string): Promise<void> {
   const deleteUrl = `${ORACLE_PAR_URL}${filename}`
@@ -114,10 +104,25 @@ export async function deleteFile(filename: string): Promise<void> {
     method: "DELETE",
   })
 
-  if (!response.ok && response.status !== 404) {
-    throw new Error(`Oracle storage deletion failed: ${response.status} ${response.statusText}`)
+  if (!response.ok) {
+    // If 404, it's already gone, so we can consider it success
+    if (response.status === 404) return
+    
+    const errorText = await response.text().catch(() => "Unknown error")
+    throw new Error(`Oracle storage delete failed: ${response.status} ${response.statusText} - ${errorText}`)
   }
 }
+
+/**
+ * Get a signed URL for a file (in Oracle's case, just returns the PAR URL + filename)
+ * @param filename - The filename
+ * @returns The public URL
+ */
+export function getPublicUrl(filename: string): string {
+  return `${ORACLE_PAR_URL}${filename}`
+}
+
+
 
 export default {
   uploadFile,

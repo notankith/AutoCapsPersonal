@@ -236,6 +236,8 @@ async function buildPreviewResponse({
   const metadata = (upload.metadata as Record<string, unknown> | null) ?? null
   const templateId = typeof metadata?.templateId === "string" ? metadata.templateId : null
   const transcriptLanguage = transcript.source_language ?? (typeof metadata?.language === "string" ? metadata.language : null)
+  
+  const lastRenderedUrl = upload.render_asset_path ? getPublicUrl(upload.render_asset_path) : null
 
   return {
     jobId,
@@ -246,6 +248,7 @@ async function buildPreviewResponse({
       metadata,
       templateId,
       language: transcriptLanguage ?? null,
+      lastRenderedUrl,
     },
     video: {
       url: signedUrl,

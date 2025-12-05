@@ -1,19 +1,43 @@
 import { getDb } from "@/lib/mongodb"
 import { SettingsTabs } from "@/components/settings/settings-tabs"
+import { getCurrentUser } from "@/lib/auth"
+import { ObjectId } from "mongodb"
+import { redirect } from "next/navigation"
 
 export const dynamic = "force-dynamic"
 
 export default async function SettingsPage() {
-  // TODO: Get user from session/JWT token
-  const userId = "default-user" // Temporary until auth is implemented
+  const currentUser = await getCurrentUser()
+  if (!currentUser) {
+    redirect("/auth/login")
+  }
 
   const db = await getDb()
   
   // Fetch user profile and subscription
-  const user = await db.collection("users").findOne({ _id: userId as any }).catch(() => null)
-  const profile = await db.collection("profiles").findOne({ user_id: userId }).catch(() => null)
+  const user = await db.collection("users").findOne({ _id: new ObjectId(currentUser.userId) })
+  
+  if (!user) {
+    redirect("/auth/login")
+  }
+
+  // Map user data to profile format expected by components
+  // We store display_name directly on user now
+  const serializedUser = {
+    ...user,
+    _id: user._id.toString(),
+    created_at: user.created_at?.toISOString(),
+    updated_at: user.updated_at?.toISOString(),
+    last_login: user.last_login?.toISOString(),
+  }
+
+  const profile = {
+    display_name: user.display_name,
+    ...serializedUser
+  }
+
   const subscription = await db.collection("subscriptions").findOne({ 
-    user_id: userId,
+    user_id: currentUser.userId,
     status: "active" 
   }).catch(() => null)
 
@@ -24,7 +48,7 @@ export default async function SettingsPage() {
         <p className="text-muted-foreground mt-2">Manage your account and preferences</p>
       </div>
 
-      <SettingsTabs user={user} profile={profile} subscription={subscription} />
+      <SettingsTabs user={serializedUser} profile={profile} subscription={subscription} />
     </div>
   )
 }

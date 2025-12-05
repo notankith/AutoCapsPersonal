@@ -1,14 +1,11 @@
 import { NextResponse } from "next/server"
+import { cookies } from "next/headers"
 
-/**
- * Logout endpoint - In MongoDB setup, session management should be 
- * handled client-side (localStorage/sessionStorage) or via JWT tokens.
- * This endpoint is a placeholder for clearing server-side sessions if needed.
- */
 export async function POST() {
   try {
-    // Clear any server-side session data here if implemented
-    // For now, just return success - client should clear localStorage
+    const cookieStore = await cookies()
+    cookieStore.delete("auth_token")
+    
     return NextResponse.json({ success: true })
   } catch (error) {
     console.error("Logout error:", error)

@@ -2,6 +2,10 @@ import { getDb } from "@/lib/mongodb"
 import { type NextRequest, NextResponse } from "next/server"
 import { ObjectId } from "mongodb"
 import bcrypt from "bcryptjs"
+import jwt from "jsonwebtoken"
+import { cookies } from "next/headers"
+
+const JWT_SECRET = process.env.JWT_SECRET || process.env.WORKER_JWT_SECRET || "default-secret-key-change-me"
 
 export async function POST(request: NextRequest) {
   try {
@@ -36,10 +40,30 @@ export async function POST(request: NextRequest) {
       display_name: displayName || null,
       created_at: new Date(),
       updated_at: new Date(),
-      last_login: null,
+      last_login: new Date(),
     }
 
     const result = await db.collection("users").insertOne(newUser)
+
+    // Create JWT token
+    const token = jwt.sign(
+      { 
+        userId: result.insertedId.toString(),
+        email: newUser.email 
+      },
+      JWT_SECRET,
+      { expiresIn: "30d" }
+    )
+
+    // Set cookie
+    const cookieStore = await cookies()
+    cookieStore.set("auth_token", token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      maxAge: 30 * 24 * 60 * 60, // 30 days
+      path: "/",
+    })
 
     return NextResponse.json({
       success: true,
