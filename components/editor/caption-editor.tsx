@@ -3,11 +3,46 @@
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { Trash2 } from "lucide-react"
+import { useEffect, useState } from "react"
 
 interface CaptionEditorProps {
   caption: any
   onUpdate: (updates: any) => void
   onDelete: () => void
+}
+
+function DebouncedInput({ 
+  value, 
+  onChange, 
+  type = "text", 
+  ...props 
+}: { 
+  value: string | number
+  onChange: (val: string) => void
+  type?: string
+  [key: string]: any 
+}) {
+  const [localValue, setLocalValue] = useState(value)
+
+  useEffect(() => {
+    setLocalValue(value)
+  }, [value])
+
+  return (
+    <Input
+      {...props}
+      type={type}
+      value={localValue}
+      onChange={(e) => setLocalValue(e.target.value)}
+      onBlur={() => onChange(localValue.toString())}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          onChange(localValue.toString())
+          e.currentTarget.blur()
+        }
+      }}
+    />
+  )
 }
 
 export function CaptionEditor({ caption, onUpdate, onDelete }: CaptionEditorProps) {
@@ -32,27 +67,27 @@ export function CaptionEditor({ caption, onUpdate, onDelete }: CaptionEditorProp
       <div className="grid grid-cols-2 gap-4">
         <div>
           <label className="block text-sm font-medium mb-2">Start Time</label>
-          <Input
+          <DebouncedInput
             type="number"
-            value={caption.start_time}
-            onChange={(e) => onUpdate({ start_time: Number.parseFloat(e.target.value) })}
+            value={caption.start_time || caption.start}
+            onChange={(val) => onUpdate({ start: Number.parseFloat(val) })}
             step="0.1"
             min="0"
             className="font-mono"
           />
-          <p className="text-xs text-muted-foreground mt-1">{formatTime(caption.start_time)}</p>
+          <p className="text-xs text-muted-foreground mt-1">{formatTime(caption.start_time || caption.start)}</p>
         </div>
         <div>
           <label className="block text-sm font-medium mb-2">End Time</label>
-          <Input
+          <DebouncedInput
             type="number"
-            value={caption.end_time}
-            onChange={(e) => onUpdate({ end_time: Number.parseFloat(e.target.value) })}
+            value={caption.end_time || caption.end}
+            onChange={(val) => onUpdate({ end: Number.parseFloat(val) })}
             step="0.1"
-            min={caption.start_time}
+            min={caption.start_time || caption.start}
             className="font-mono"
           />
-          <p className="text-xs text-muted-foreground mt-1">{formatTime(caption.end_time)}</p>
+          <p className="text-xs text-muted-foreground mt-1">{formatTime(caption.end_time || caption.end)}</p>
         </div>
       </div>
 

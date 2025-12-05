@@ -14,6 +14,65 @@ import { SimpleCaptionOverlay } from "./caption-overlays"
 import { CreatorKineticOverlay, type OverlayConfig } from "./creator-kinetic-overlay"
 import { type KineticWord } from "./kinetic-caption-utils"
 
+function DebouncedNumberInput({
+  value,
+  onChange,
+  step = 0.001,
+  min,
+  className,
+}: {
+  value: number
+  onChange: (val: number) => void
+  step?: number
+  min?: number
+  className?: string
+}) {
+  // Initialize with formatted value, removing trailing zeros if integer
+  const format = (v: number) => v.toFixed(3).replace(/\.?0+$/, "")
+  const [localValue, setLocalValue] = useState(format(value))
+
+  useEffect(() => {
+    // Update local value if parent value changes significantly (e.g. from other edits)
+    // But avoid overwriting if it's just a formatting difference of the same number
+    if (Math.abs(parseFloat(localValue) - value) > 0.001) {
+       setLocalValue(format(value))
+    }
+  }, [value])
+
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setLocalValue(e.target.value)
+  }
+
+  const handleBlur = () => {
+    const num = parseFloat(localValue)
+    if (!isNaN(num)) {
+      onChange(num)
+      setLocalValue(format(num))
+    } else {
+      setLocalValue(format(value))
+    }
+  }
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") {
+      e.currentTarget.blur()
+    }
+  }
+
+  return (
+    <Input
+      type="number"
+      step={step}
+      min={min}
+      value={localValue}
+      onChange={handleChange}
+      onBlur={handleBlur}
+      onKeyDown={handleKeyDown}
+      className={className}
+    />
+  )
+}
+
 interface PostUploadWorkspaceProps {
   uploadId: string
 }
@@ -134,7 +193,7 @@ export function PostUploadWorkspace({ uploadId }: PostUploadWorkspaceProps) {
       setPreviewError(null)
 
       try {
-        const response = await fetch("/api/preview/init", {
+        const response = await fetch("/api/videos/transcribe", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ uploadId }),
@@ -397,9 +456,29 @@ export function PostUploadWorkspace({ uploadId }: PostUploadWorkspaceProps) {
   }
 
   const handleAddSegment = () => {
-    const lastEnd = captionSegments.length ? captionSegments[captionSegments.length - 1].end : currentTime
-    const start = Number.isFinite(currentTime) ? currentTime : lastEnd
-    const end = start + 2
+    // Find intelligent placement for new segment
+    const sorted = [...captionSegments].sort((a, b) => a.start - b.start)
+    let start = currentTime
+    let end = start + 2
+
+    // If current time is inside an existing segment, place after it
+    const overlapping = sorted.find(s => currentTime >= s.start && currentTime < s.end)
+    if (overlapping) {
+      start = overlapping.end + 0.1
+      end = start + 2
+    } else {
+      // If in a gap, try to fill it but don't overlap next segment
+      const nextSegment = sorted.find(s => s.start > currentTime)
+      if (nextSegment) {
+        end = Math.min(start + 2, nextSegment.start - 0.1)
+        // If gap is too small, push it after the next segment
+        if (end - start < 0.5) {
+          start = nextSegment.end + 0.1
+          end = start + 2
+        }
+      }
+    }
+
     const newSegment: CaptionSegment = {
       id: `segment_${Date.now()}`,
       start,
@@ -407,7 +486,8 @@ export function PostUploadWorkspace({ uploadId }: PostUploadWorkspaceProps) {
       text: "New caption",
     }
     // Always add to baseSegmentsRef
-    baseSegmentsRef.current = [...baseSegmentsRef.current, newSegment]
+    baseSegmentsRef.current = [...baseSegmentsRef.current, newSegment].sort((a, b) => a.start - b.start)
+    
     // Reshape from baseSegmentsRef for current template
     const templateForShape = selectedTemplateOption ?? defaultTemplates[0]
     setCaptionSegments(
@@ -957,31 +1037,21 @@ export function PostUploadWorkspace({ uploadId }: PostUploadWorkspaceProps) {
                                 <div className="mt-3 grid grid-cols-2 gap-3 text-xs">
                                   <label className="space-y-1 text-muted-foreground">
                                     <span className="block uppercase tracking-wide">Start</span>
-                                    <Input
-                                      type="number"
-                                      value={segment.start.toFixed(2)}
-                                      step={0.1}
+                                    <DebouncedNumberInput
+                                      value={segment.start}
+                                      step={0.001}
                                       min={0}
-                                      onChange={(event) => {
-                                        const nextValue = Number(event.target.value)
-                                        if (Number.isNaN(nextValue)) return
-                                        handleSegmentTimingChange(segment.id, "start", nextValue)
-                                      }}
+                                      onChange={(val) => handleSegmentTimingChange(segment.id, "start", val)}
                                       className="text-sm"
                                     />
                                   </label>
                                   <label className="space-y-1 text-muted-foreground">
                                     <span className="block uppercase tracking-wide">End</span>
-                                    <Input
-                                      type="number"
-                                      value={segment.end.toFixed(2)}
-                                      step={0.1}
+                                    <DebouncedNumberInput
+                                      value={segment.end}
+                                      step={0.001}
                                       min={segment.start + 0.1}
-                                      onChange={(event) => {
-                                        const nextValue = Number(event.target.value)
-                                        if (Number.isNaN(nextValue)) return
-                                        handleSegmentTimingChange(segment.id, "end", nextValue)
-                                      }}
+                                      onChange={(val) => handleSegmentTimingChange(segment.id, "end", val)}
                                       className="text-sm"
                                     />
                                   </label>

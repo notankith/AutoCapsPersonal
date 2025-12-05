@@ -2,7 +2,7 @@ import { createServer } from "node:http"
 import { promises as fs } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, dirname } from "node:path"
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
+import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process"
 import jwt from "jsonwebtoken"
 import { MongoClient, ObjectId, type Db } from "mongodb"
 import { STORAGE_PREFIX, RENDER_RESOLUTIONS, type CaptionTemplate, type RenderOverlay } from "@/lib/pipeline"
@@ -182,7 +182,6 @@ async function processJob(payload: RenderJobPayload) {
     await downloadToFile(captionUrl, captionTmp)
 
     // Get video duration using ffprobe after video is downloaded
-    const { getVideoDuration } = require("./ffprobe-helper")
     const videoDuration = getVideoDuration(videoTmp)
     console.log("[worker] Video duration:", videoDuration)
 
@@ -606,5 +605,37 @@ async function ensureSignedUrl(url: string | undefined, _bucket: string, path: s
   if (url) return url
   if (!path) throw new Error("Missing storage path")
   return getOracleStorageUrl(path)
+}
+
+function getVideoDuration(filePath: string): number {
+  try {
+    // Try using ffprobe first (if available in PATH)
+    const result = spawnSync("ffprobe", [
+      "-v", "error",
+      "-show_entries", "format=duration",
+      "-of", "default=noprint_wrappers=1:nokey=1",
+      filePath
+    ])
+    
+    if (result.status === 0) {
+      const duration = parseFloat(result.stdout.toString().trim())
+      if (!isNaN(duration)) return duration
+    }
+    
+    // Fallback to ffmpeg if ffprobe fails
+    // ffmpeg output goes to stderr
+    const ffmpegResult = spawnSync(ffmpegBinary, ["-i", filePath])
+    const output = ffmpegResult.stderr.toString()
+    const match = output.match(/Duration: (\d{2}):(\d{2}):(\d{2}\.\d{2})/)
+    if (match) {
+      const hours = parseFloat(match[1])
+      const minutes = parseFloat(match[2])
+      const seconds = parseFloat(match[3])
+      return hours * 3600 + minutes * 60 + seconds
+    }
+  } catch (e) {
+    console.error("Failed to get video duration:", e)
+  }
+  return 0
 }
 

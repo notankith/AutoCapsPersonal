@@ -84,7 +84,6 @@ These files still import Supabase and need updates:
 - `scripts/ffmpeg-worker.ts` - Render worker
 
 **Low Priority:**
-- `scripts/upload-test.ts` - Test scripts
 - `app/api/transcripts/**` - Transcript routes
 - Other dashboard pages
 

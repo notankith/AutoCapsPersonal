@@ -22,6 +22,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`
 
 const CREATOR_KINETIC_MAX_WORDS_PER_LINE = 4
 const CREATOR_KINETIC_MAX_LINES_PER_CHUNK = 2
+const CREATOR_KINETIC_MAX_CHARS_PER_LINE = 25 // New constraint
 type SegmentWord = NonNullable<CaptionSegment["words"]>[number]
 
 export type CaptionFile = {
@@ -164,10 +165,11 @@ function generateKaraokeEvents(template: CaptionTemplate, segments: CaptionSegme
                   const highlightEnd = rel + dur;
                   const txt = escapeAssText(word.text.toUpperCase());
 
-                  // Soft glow layer using highlight color with high transparency
-                  const base = `\\alpha&HCC&\\1c${highlightColorAss}\\bord0\\blur3\\shad0`;
-                  const activate = `\\t(${rel},${rel + 50},\\alpha&HAA&)`;
-                  const deactivate = `\\t(${highlightEnd},${highlightEnd + 80},\\alpha&HCC&)`;
+                  // Stronger glow layer: Higher opacity (lower hex) and wider blur
+                  // &H60& is ~37% transparent (63% opaque), &H30& is ~19% transparent (81% opaque)
+                  const base = `\\alpha&H60&\\1c${highlightColorAss}\\bord0\\blur10\\shad0`;
+                  const activate = `\\t(${rel},${rel + 50},\\alpha&H30&)`;
+                  const deactivate = `\\t(${highlightEnd},${highlightEnd + 80},\\alpha&H60&)`;
 
                   return `{${chunkZoomIn}${base}${activate}${deactivate}}${txt}`;
                 })
@@ -177,10 +179,12 @@ function generateKaraokeEvents(template: CaptionTemplate, segments: CaptionSegme
 
           globalChunkIndex++;
 
+          // Layer 0: Glow (Stronger)
           const glowDialogue = `Dialogue: 0,${formatAssTimestamp(chunkStart)},${formatAssTimestamp(
             chunkEnd
           )},${template.name},,0,0,0,,${glowLines}`;
 
+          // Layer 1: Core Text (White/Primary)
           const coreDialogue = `Dialogue: 1,${formatAssTimestamp(chunkStart)},${formatAssTimestamp(
             chunkEnd
           )},${template.name},,0,0,0,,${renderedLines}`;
@@ -229,13 +233,48 @@ function escapeAssText(text: string) {
 function chunkWordsForCenter(words: NonNullable<CaptionSegment["words"]>): NonNullable<CaptionSegment["words"]>[] {
   if (!words.length) return []
 
-  const chunkSize = CREATOR_KINETIC_MAX_WORDS_PER_LINE * CREATOR_KINETIC_MAX_LINES_PER_CHUNK
   const chunks: NonNullable<CaptionSegment["words"]>[] = []
+  let currentChunk: NonNullable<CaptionSegment["words"]> = []
+  let currentLineLength = 0
+  let currentLines = 1
 
-  for (let i = 0; i < words.length; i += chunkSize) {
-    chunks.push(words.slice(i, i + chunkSize))
+  for (const word of words) {
+    const wordLen = word.text.length
+    
+    // Check if adding this word exceeds line length limit
+    if (currentLineLength + wordLen > CREATOR_KINETIC_MAX_CHARS_PER_LINE) {
+      // If we are already at max lines, push chunk and start new
+      if (currentLines >= CREATOR_KINETIC_MAX_LINES_PER_CHUNK) {
+        chunks.push(currentChunk)
+        currentChunk = [word]
+        currentLineLength = wordLen
+        currentLines = 1
+      } else {
+        // Start new line in same chunk
+        currentChunk.push(word)
+        currentLineLength = wordLen
+        currentLines++
+      }
+    } else {
+      // Add to current line
+      currentChunk.push(word)
+      currentLineLength += wordLen + 1 // +1 for space
+      
+      // Check word count limit per chunk
+      if (currentChunk.length >= CREATOR_KINETIC_MAX_WORDS_PER_LINE * CREATOR_KINETIC_MAX_LINES_PER_CHUNK) {
+        chunks.push(currentChunk)
+        currentChunk = []
+        currentLineLength = 0
+        currentLines = 1
+      }
+    }
   }
 
+  if (currentChunk.length > 0) {
+    chunks.push(currentChunk)
+  }
+
+  // Balance orphans
   if (chunks.length >= 2) {
     const last = chunks[chunks.length - 1]
     if (last.length === 1) {

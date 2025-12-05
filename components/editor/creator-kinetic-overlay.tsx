@@ -579,12 +579,42 @@ export function CreatorKineticOverlay({
             0 0 calc(4px * ${responsiveScale}) var(--caption-outline-color),
             0 0 calc(8px * ${responsiveScale}) rgba(0, 0, 0, 0.95),
             0 0 calc(6px * ${responsiveScale}) currentColor,
-            0 0 calc(12px * ${responsiveScale}) currentColor;
+            0 0 calc(12px * ${responsiveScale}) currentColor,
+            0 0 calc(10px * ${responsiveScale}) currentColor;
         }
 
-        .word.active.blue { color: var(--highlight-blue); }
-        .word.active.yellow { color: var(--highlight-yellow); }
-        .word.active.green { color: var(--highlight-green); }
+        .word.active.blue { 
+          color: var(--highlight-blue);
+          text-shadow:
+            0 0 calc(2px * ${responsiveScale}) var(--caption-outline-color),
+            0 0 calc(4px * ${responsiveScale}) var(--caption-outline-color),
+            0 0 calc(8px * ${responsiveScale}) rgba(0, 0, 0, 0.95),
+            0 0 calc(6px * ${responsiveScale}) var(--highlight-blue),
+            0 0 calc(12px * ${responsiveScale}) var(--highlight-blue),
+            0 0 calc(16px * ${responsiveScale}) rgba(112, 226, 255, 0.2);
+        }
+
+        .word.active.yellow { 
+          color: var(--highlight-yellow);
+          text-shadow:
+            0 0 calc(2px * ${responsiveScale}) var(--caption-outline-color),
+            0 0 calc(4px * ${responsiveScale}) var(--caption-outline-color),
+            0 0 calc(8px * ${responsiveScale}) rgba(0, 0, 0, 0.95),
+            0 0 calc(6px * ${responsiveScale}) var(--highlight-yellow),
+            0 0 calc(12px * ${responsiveScale}) var(--highlight-yellow),
+            0 0 calc(16px * ${responsiveScale}) rgba(255, 232, 63, 0.2);
+        }
+
+        .word.active.green { 
+          color: var(--highlight-green);
+          text-shadow:
+            0 0 calc(2px * ${responsiveScale}) var(--caption-outline-color),
+            0 0 calc(4px * ${responsiveScale}) var(--caption-outline-color),
+            0 0 calc(8px * ${responsiveScale}) rgba(0, 0, 0, 0.95),
+            0 0 calc(6px * ${responsiveScale}) var(--highlight-green),
+            0 0 calc(12px * ${responsiveScale}) var(--highlight-green),
+            0 0 calc(16px * ${responsiveScale}) rgba(159, 255, 91, 0.2);
+        }
       `}</style>
 
       <div
